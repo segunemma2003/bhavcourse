@@ -7,6 +7,17 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: test_db
+        ports:
+          - 3306:3306
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+
     steps:
       - uses: actions/checkout@v2
 
@@ -15,28 +26,74 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Install Dependencies
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-dev default-libmysqlclient-dev build-essential
+
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
+          pip install mysqlclient
           pip install -r requirements.txt
 
       - name: Create test .env file
         run: |
-          cp .env.example .env.test
-          echo "SECRET_KEY=test_key" >> .env.test
-          echo "DEBUG=True" >> .env.test
-          echo "DB_NAME=test_db" >> .env.test
-          echo "DB_USER=test_user" >> .env.test
-          echo "DB_PASSWORD=test_password" >> .env.test
+          cat > .env.test << 'EOL'
+          SECRET_KEY=django-insecure-test-key
+          DEBUG=True
+          ALLOWED_HOSTS=localhost,127.0.0.1
+
+          # Database settings - use the MySQL service
+          DB_ENGINE=django.db.backends.mysql
+          DB_NAME=test_db
+          DB_USER=root
+          DB_PASSWORD=root
+          DB_HOST=127.0.0.1
+          DB_PORT=3306
+
+          # Redis/Celery settings - not needed for tests
+          REDIS_URL=redis://localhost:6379/0
+          EOL
+
+      - name: Update settings for CI
+        run: |
+          # Copy settings.py to a backup
+          cp courseapp/settings.py courseapp/settings.py.bak
+
+          # Add conditional test settings to override database settings
+          cat >> courseapp/settings.py << 'EOL'
+
+          # CI Testing specific settings
+          import sys
+          if 'test' in sys.argv:
+              DATABASES = {
+                  'default': {
+                      'ENGINE': 'django.db.backends.mysql',
+                      'NAME': 'test_db',
+                      'USER': 'root',
+                      'PASSWORD': 'root',
+                      'HOST': '127.0.0.1',
+                      'PORT': '3306',
+                  }
+              }
+          EOL
 
       - name: Run Tests
         env:
           DJANGO_SETTINGS_MODULE: courseapp.settings
           ENV_FILE: .env.test
         run: |
+          # Wait for MySQL to be ready
+          sleep 5
+          # Run Django check and migrate first to verify DB setup
+          python manage.py check
+          python manage.py migrate --noinput
+          # Run tests
           python manage.py test
 
   deploy:
+    # Comment out the next line to skip test dependency if needed
     needs: test
     runs-on: ubuntu-latest
     steps:
@@ -49,6 +106,4 @@ jobs:
           port: ${{ secrets.PORT }}
           script: |
             cd /var/www/bhavani
-
-            # Only run the deployment script
             ./deploy.sh
