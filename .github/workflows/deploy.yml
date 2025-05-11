@@ -47,13 +47,13 @@ jobs:
           DATABASES = {
               'default': {
                   'ENGINE': 'django.db.backends.mysql',
-                  'NAME': 'test_db',
-                  'USER': 'root',
-                  'PASSWORD': 'root',
+                  'NAME': 'bhavani',
+                  'USER': 'bhavaniusers',
+                  'PASSWORD': '',
                   'HOST': '127.0.0.1',  # Use TCP/IP connection instead of socket
                   'PORT': '3306',
                   'TEST': {
-                      'NAME': 'test_db',
+                      'NAME': 'bhavani',
                       'CHARSET': 'utf8mb4',
                       'COLLATION': 'utf8mb4_unicode_ci',
                   },
