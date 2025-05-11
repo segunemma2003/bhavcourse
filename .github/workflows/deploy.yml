@@ -31,7 +31,7 @@ jobs:
 
       - name: Run Tests
         env:
-          DJANGO_SETTINGS_MODULE: bhavani.settings
+          DJANGO_SETTINGS_MODULE: courseapp.settings
           ENV_FILE: .env.test
         run: |
           python manage.py test

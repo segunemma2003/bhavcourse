@@ -13,7 +13,7 @@ chmod 600 $BACKUP_DIR/env_$TIMESTAMP.backup
 mysqldump -u$DB_USER -p$DB_PASSWORD $DB_NAME | gzip > $BACKUP_DIR/db_$TIMESTAMP.sql.gz
 
 # Media files backup
-tar -zcf $BACKUP_DIR/media_$TIMESTAMP.tar.gz -C /var/www/yourproject media
+tar -zcf $BACKUP_DIR/media_$TIMESTAMP.tar.gz -C /var/www/bhavani media
 
 # Delete backups older than 7 days
 find $BACKUP_DIR -type f -name "*.backup" -mtime +7 -delete
