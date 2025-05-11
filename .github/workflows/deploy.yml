@@ -99,21 +99,28 @@ jobs:
           # Run Django tests
           python manage.py test --keepdb
 
-          # If you need to specify specific apps to test
-          # python manage.py test your_app1 your_app2 --keepdb
-
   deploy:
     # Comment out the next line to skip test dependency if needed
     # needs: test
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy to server
-        uses: appleboy/ssh-action@master
-        with:
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.USERNAME }}
-          key: ${{ secrets.SSH_KEY }}
-          port: ${{ secrets.PORT }}
-          script: |
+      - name: Debug SSH Key
+        run: |
+          echo "SSH Key length: ${#SSH_KEY}"
+          echo "First 10 characters: ${SSH_KEY:0:10}..."
+        env:
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -t rsa ${{ secrets.HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy using SSH
+        run: |
+          ssh -i ~/.ssh/id_rsa ${{ secrets.USERNAME }}@${{ secrets.HOST }} -p ${{ secrets.PORT }} << 'EOF'
             cd /var/www/bhavani
             ./deploy.sh
+          EOF
