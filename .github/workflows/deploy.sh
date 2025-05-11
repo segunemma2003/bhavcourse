@@ -1,21 +1,61 @@
 #!/bin/bash
-TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-BACKUP_DIR="/var/backups/bhavani"
+set -e
 
-# Create backup directory if it doesn't exist
-mkdir -p $BACKUP_DIR
+# Navigate to project directory
+cd /var/www/bhavani
 
-# Backup .env file with restricted permissions
-cp /var/www/bhavani/.env $BACKUP_DIR/env_$TIMESTAMP.backup
-chmod 600 $BACKUP_DIR/env_$TIMESTAMP.backup
+# Activate virtual environment
+source venv/bin/activate
 
-# Database backup
-mysqldump -u$DB_USER -p$DB_PASSWORD $DB_NAME | gzip > $BACKUP_DIR/db_$TIMESTAMP.sql.gz
+# Install MySQL client development libraries (only needed once)
+sudo apt-get update
+sudo apt-get install -y python3-dev default-libmysqlclient-dev build-essential
 
-# Media files backup
-tar -zcf $BACKUP_DIR/media_$TIMESTAMP.tar.gz -C /var/www/bhavani media
+# Install Redis if needed for Celery
+sudo apt-get install -y redis-server
+sudo systemctl enable redis-server
+sudo systemctl start redis-server
 
-# Delete backups older than 7 days
-find $BACKUP_DIR -type f -name "*.backup" -mtime +7 -delete
-find $BACKUP_DIR -type f -name "*.sql.gz" -mtime +7 -delete
-find $BACKUP_DIR -type f -name "*.tar.gz" -mtime +7 -delete
+# Install/update dependencies
+pip install -r requirements.txt
+pip install mysqlclient  # Explicitly install mysqlclient
+
+# Create .env file if it doesn't exist
+if [ ! -f .env ]; then
+    echo "Creating .env file..."
+    cp .env.example .env
+    echo "Please update .env with real values!"
+fi
+
+# Create static and media directories if they don't exist
+mkdir -p static
+mkdir -p media
+
+# Make sure the static and media directories are writable
+chmod -R 755 static
+chmod -R 755 media
+
+# Run migrations
+python manage.py migrate
+
+# Collect static files
+python manage.py collectstatic --noinput
+
+# Fix permissions
+find . -type d -exec chmod 755 {} \;
+find . -type f -exec chmod 644 {} \;
+chmod +x manage.py
+chmod +x deploy.sh
+
+# Start/restart services if needed
+sudo systemctl restart redis-server  # Restart Redis for Celery
+
+# Restart Supervisor services if configured
+if command -v supervisorctl &> /dev/null; then
+    echo "Restarting services with supervisor..."
+    sudo supervisorctl restart courseapp:* || echo "Supervisor not configured yet"
+else
+    echo "Supervisor not installed, skipping service restart"
+fi
+
+echo "Deployment completed successfully!"
