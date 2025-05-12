@@ -3,7 +3,7 @@ from django.contrib.auth import get_user_model
 from allauth.account.adapter import get_adapter
 from allauth.account.utils import setup_user_email
 from dj_rest_auth.registration.serializers import RegisterSerializer
-from .models import (Category, ContentPage, Course, CourseObjective, CourseRequirement, CourseCurriculum, Enrollment, FCMDevice, GeneralSettings, Notification, 
+from .models import (Category, ContentPage, Course, CourseObjective, CourseRequirement, CourseCurriculum, Enrollment, FCMDevice, GeneralSettings, Notification, PaymentOrder, 
                      SubscriptionPlan, PlanFeature, UserSubscription, 
                     Wishlist, PaymentCard, Purchase
                     )
@@ -526,9 +526,51 @@ class WishlistSerializer(serializers.ModelSerializer):
         read_only_fields = ['date_added']
 
 class PaymentCardSerializer(serializers.ModelSerializer):
+    card_number = serializers.CharField(write_only=True, required=False)
+    cvv = serializers.CharField(write_only=True, required=False)
     class Meta:
         model = PaymentCard
-        fields = ['id', 'card_type', 'last_four', 'card_holder_name', 'expiry_month', 'expiry_year', 'is_default']
+        fields = [
+            'id', 'card_type', 'last_four', 'card_holder_name', 
+            'expiry_month', 'expiry_year', 'is_default',
+            'card_number', 'cvv'  # Write-only fields
+        ]
+        extra_kwargs = {
+            'last_four': {'read_only': True}
+        }
+    
+    def validate_card_number(self, value):
+        # Basic validation - you might want to add more checks
+        if value and not value.isdigit():
+            raise serializers.ValidationError("Card number must contain only digits")
+        
+        if value and len(value) < 13 or len(value) > 19:
+            raise serializers.ValidationError("Card number must be between 13 and 19 digits")
+        
+        return value
+    
+    def validate_cvv(self, value):
+        if value and not value.isdigit():
+            raise serializers.ValidationError("CVV must contain only digits")
+        
+        if value and len(value) < 3 or len(value) > 4:
+            raise serializers.ValidationError("CVV must be 3 or 4 digits")
+        
+        return value
+    
+    def create(self, validated_data):
+        # Extract and remove write-only fields
+        card_number = validated_data.pop('card_number', None)
+        cvv = validated_data.pop('cvv', None)
+        
+        # Set last_four from the card number
+        if card_number:
+            validated_data['last_four'] = card_number[-4:]
+        
+        # Create the payment card
+        payment_card = super().create(validated_data)
+        
+        return payment_card
 
 class PurchaseSerializer(serializers.ModelSerializer):
     course_title = serializers.CharField(source='course.title', read_only=True)
@@ -540,9 +582,11 @@ class PurchaseSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'course', 'course_title', 'course_image', 
             'payment_card', 'card_last_four', 'amount', 
-            'purchase_date', 'transaction_id'
+            'purchase_date', 'transaction_id', 'payment_status',
+            'razorpay_order_id', 'razorpay_payment_id'
         ]
-        read_only_fields = ['purchase_date']
+        read_only_fields = ['purchase_date', 'transaction_id', 'payment_status',
+                          'razorpay_order_id', 'razorpay_payment_id']
 
 # Update UserSerializer to include date_of_birth
 class UserSerializer(serializers.ModelSerializer):
@@ -646,3 +690,51 @@ class AdminMetricsSerializer(serializers.Serializer):
     # For the graphs
     student_registration_data = serializers.DictField(read_only=True)
     course_popularity = serializers.ListField(read_only=True)
+    
+    
+class PaymentOrderSerializer(serializers.ModelSerializer):
+    course_title = serializers.CharField(source='course.title', read_only=True)
+    plan_name = serializers.CharField(source='plan.name', read_only=True)
+    
+    class Meta:
+        model = PaymentOrder
+        fields = [
+            'id', 'course', 'course_title', 'plan', 'plan_name', 
+            'amount', 'razorpay_order_id', 'status',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['razorpay_order_id', 'status', 'created_at', 'updated_at']
+
+class CreateOrderSerializer(serializers.Serializer):
+    course_id = serializers.IntegerField()
+    plan_id = serializers.IntegerField()
+    payment_card_id = serializers.IntegerField(required=False, allow_null=True)
+    
+    def validate_course_id(self, value):
+        try:
+            Course.objects.get(pk=value)
+            return value
+        except Course.DoesNotExist:
+            raise serializers.ValidationError("Course does not exist")
+    
+    def validate_plan_id(self, value):
+        try:
+            SubscriptionPlan.objects.get(pk=value)
+            return value
+        except SubscriptionPlan.DoesNotExist:
+            raise serializers.ValidationError("Subscription plan does not exist")
+    
+    def validate_payment_card_id(self, value):
+        if value is None:
+            return None
+            
+        try:
+            PaymentCard.objects.get(pk=value)
+            return value
+        except PaymentCard.DoesNotExist:
+            raise serializers.ValidationError("Payment card does not exist")
+
+class VerifyPaymentSerializer(serializers.Serializer):
+    razorpay_payment_id = serializers.CharField()
+    razorpay_order_id = serializers.CharField()
+    razorpay_signature = serializers.CharField()

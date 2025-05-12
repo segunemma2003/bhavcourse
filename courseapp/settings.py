@@ -304,3 +304,7 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID')  # Replace with your key
+RAZORPAY_KEY_SECRET = os.environ.get('RAZORPAY_KEY_SECRET')   # Replace with your secret
+RAZORPAY_CURRENCY = 'INR'     
+RAZORPAY_WEBHOOK_SECRET= os.environ.get('RAZORPAY_WEBHOOK_SECRET')  # Replace with your webhook secret

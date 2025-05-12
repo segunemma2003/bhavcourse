@@ -20,9 +20,9 @@ from .models import (
 )
 from .serializers import (
     CourseCurriculumSerializer, CourseListSerializer, CourseDetailSerializer, CategorySerializer,
-    CourseCreateUpdateSerializer, CourseObjectiveSerializer, CourseRequirementSerializer, EnrollmentSerializer, FCMDeviceSerializer, 
+    CourseCreateUpdateSerializer, CourseObjectiveSerializer, CourseRequirementSerializer, CreateOrderSerializer, EnrollmentSerializer, FCMDeviceSerializer, 
     NotificationSerializer, SubscriptionPlanSerializer, SubscriptionPlanCreateUpdateSerializer,
-    UserSubscriptionSerializer, WishlistSerializer, 
+    UserSubscriptionSerializer, VerifyPaymentSerializer, WishlistSerializer, 
     PaymentCardSerializer, PurchaseSerializer, UserSerializer,
     ForgotPasswordSerializer, VerifyOTPSerializer
 )
@@ -842,35 +842,124 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
     
     @swagger_auto_schema(
         operation_summary="Enroll in a course",
-        operation_description="Enrolls the user in a course. Requires an active subscription.",
-        request_body=EnrollmentSerializer
+        operation_description="Creates a payment order for course enrollment. Requires payment through Razorpay.",
+        request_body=CreateOrderSerializer,
+        responses={
+            status.HTTP_201_CREATED: openapi.Response(
+                description="Order created successfully",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'order_id': openapi.Schema(type=openapi.TYPE_STRING),
+                        'amount': openapi.Schema(type=openapi.TYPE_NUMBER),
+                        'currency': openapi.Schema(type=openapi.TYPE_STRING),
+                        'payment_order_id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                        'key_id': openapi.Schema(type=openapi.TYPE_STRING),
+                        'user_info': openapi.Schema(
+                            type=openapi.TYPE_OBJECT,
+                            properties={
+                                'name': openapi.Schema(type=openapi.TYPE_STRING),
+                                'email': openapi.Schema(type=openapi.TYPE_STRING),
+                                'contact': openapi.Schema(type=openapi.TYPE_STRING)
+                            }
+                        ),
+                        'notes': openapi.Schema(type=openapi.TYPE_OBJECT)
+                    }
+                )
+            ),
+            status.HTTP_400_BAD_REQUEST: "Invalid request data"
+        }
     )
     def create(self, request, *args, **kwargs):
-        # Check if already enrolled
-        course_id = request.data.get('course')
-        if Enrollment.objects.filter(user=request.user, course_id=course_id).exists():
+        # Redirect to create order view for payment processing
+        from .payment_views import CreateOrderView
+        return CreateOrderView.as_view()(request)
+    
+    @swagger_auto_schema(
+        operation_summary="Verify enrollment payment",
+        operation_description="Verifies the payment and completes the enrollment process.",
+        request_body=VerifyPaymentSerializer,
+        responses={
+            status.HTTP_200_OK: openapi.Response(
+                description="Payment verified and enrollment completed",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'message': openapi.Schema(type=openapi.TYPE_STRING),
+                        'purchase': openapi.Schema(type=openapi.TYPE_OBJECT),
+                        'enrollment_id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                        'subscription_end_date': openapi.Schema(type=openapi.TYPE_STRING, format='date-time')
+                    }
+                )
+            ),
+            status.HTTP_400_BAD_REQUEST: "Invalid payment signature"
+        }
+    )
+    @action(detail=False, methods=['post'])
+    def verify_payment(self, request):
+        # Redirect to verify payment view
+        from .payment_views import VerifyPaymentView
+        return VerifyPaymentView.as_view()(request)
+    
+    @swagger_auto_schema(
+        operation_summary="Check enrollment status",
+        operation_description="Checks if the user is enrolled in a specific course",
+        responses={
+            status.HTTP_200_OK: openapi.Response(
+                description="Enrollment status",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'is_enrolled': openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                        'subscription_details': openapi.Schema(
+                            type=openapi.TYPE_OBJECT,
+                            properties={
+                                'plan_name': openapi.Schema(type=openapi.TYPE_STRING),
+                                'end_date': openapi.Schema(type=openapi.TYPE_STRING, format='date-time'),
+                                'is_active': openapi.Schema(type=openapi.TYPE_BOOLEAN)
+                            }
+                        )
+                    }
+                )
+            )
+        }
+    )
+    @action(detail=False, methods=['get'])
+    def check_status(self, request):
+        course_id = request.query_params.get('course_id')
+        if not course_id:
             return Response(
-                {'error': 'You are already enrolled in this course'},
+                {"error": "course_id parameter is required"},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Check if user has an active subscription
-        has_subscription = UserSubscription.objects.filter(
-            user=request.user,
-            is_active=True,
-            end_date__gt=timezone.now()
+        # Check if user is enrolled
+        is_enrolled = Enrollment.objects.filter(
+            user=request.user, 
+            course_id=course_id
         ).exists()
         
-        if not has_subscription:
-            return Response(
-                {'error': 'You need an active subscription to enroll in courses'},
-                status=status.HTTP_403_FORBIDDEN
-            )
+        # Get subscription details if enrolled
+        subscription_details = None
+        if is_enrolled:
+            # Find the user's active subscription
+            subscription = UserSubscription.objects.filter(
+                user=request.user,
+                is_active=True,
+                end_date__gt=timezone.now()
+            ).first()
+            
+            if subscription:
+                subscription_details = {
+                    'plan_name': subscription.plan.name,
+                    'end_date': subscription.end_date,
+                    'is_active': subscription.is_active
+                }
         
-        return super().create(request, *args, **kwargs)
-    
-    def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+        return Response({
+            'is_enrolled': is_enrolled,
+            'subscription_details': subscription_details
+        })
     
     @swagger_auto_schema(
         operation_summary="Delete enrollment",
@@ -1928,3 +2017,6 @@ class CourseCurriculumViewSet(viewsets.ModelViewSet):
         queryset = self.get_queryset()
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
+    
+    
+    

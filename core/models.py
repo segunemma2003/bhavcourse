@@ -26,6 +26,7 @@ class CustomUserManager(BaseUserManager):
 
 class User(AbstractBaseUser, PermissionsMixin):
     email = models.EmailField(unique=True)
+    razorpay_customer_id = models.CharField(max_length=255, blank=True, null=True)
     full_name = models.CharField(max_length=255)
     phone_number = models.CharField(max_length=15, blank=True, null=True)
     date_of_birth = models.DateField(null=True, blank=True)
@@ -193,6 +194,16 @@ class Purchase(models.Model):
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     purchase_date = models.DateTimeField(auto_now_add=True)
     transaction_id = models.CharField(max_length=100, unique=True)
+    razorpay_order_id = models.CharField(max_length=100, blank=True, null=True)
+    razorpay_payment_id = models.CharField(max_length=100, blank=True, null=True)
+    payment_status = models.CharField(max_length=20, default='PENDING', 
+        choices=(
+            ('PENDING', 'Pending'),
+            ('COMPLETED', 'Completed'),
+            ('FAILED', 'Failed'),
+            ('REFUNDED', 'Refunded')
+        )
+    )
     
     def __str__(self):
         return f"{self.user.email} - {self.course.title}"
@@ -272,3 +283,25 @@ class GeneralSettings(models.Model):
             }
         )
         return settings
+    
+class PaymentOrder(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='payment_orders', on_delete=models.CASCADE)
+    course = models.ForeignKey(Course, related_name='payment_orders', on_delete=models.CASCADE, null=True, blank=True)
+    plan = models.ForeignKey('SubscriptionPlan', related_name='payment_orders', on_delete=models.CASCADE)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    razorpay_order_id = models.CharField(max_length=100, unique=True)
+    razorpay_payment_id = models.CharField(max_length=100, blank=True, null=True)
+    razorpay_signature = models.CharField(max_length=255, blank=True, null=True)
+    status = models.CharField(max_length=20, default='CREATED', 
+        choices=(
+            ('CREATED', 'Created'),
+            ('PAID', 'Paid'),
+            ('FAILED', 'Failed'),
+            ('REFUNDED', 'Refunded')
+        )
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    def __str__(self):
+        return f"{self.user.email} - {self.razorpay_order_id}"

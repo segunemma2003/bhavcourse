@@ -2,6 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
 from core.admin_views import AdminMetricsView, ContentPageViewSet, EnrolledStudentsListView, GeneralSettingsView, PublicContentPageView, UserListView
+from core.payment_views import CreateOrderView, VerifyPaymentView, cancel_subscription, razorpay_webhook, renew_subscription
 from .views import (
     CategoryViewSet, CourseCurriculumViewSet, CourseObjectiveViewSet, CourseRequirementViewSet, CourseViewSet, EnrollmentViewSet, NotificationViewSet, PublicCourseDetailView,
     SubscriptionPlanViewSet, UserSubscriptionViewSet, WishlistViewSet,
@@ -85,5 +86,15 @@ urlpatterns = [
     
     # Add a shortcut for complete course details
     path('courses/<int:pk>/complete/', CourseViewSet.as_view({'get': 'complete_details'}), name='course-complete-details'),
+     path('payments/create-order/', CreateOrderView.as_view(), name='create-order'),
+    path('payments/verify-payment/', VerifyPaymentView.as_view(), name='verify-payment'),
+    path('payments/cancel-subscription/<int:subscription_id>/', cancel_subscription, name='cancel-subscription'),
+    path('payments/renew-subscription/<int:subscription_id>/', renew_subscription, name='renew-subscription'),
+    path('payments/webhook/', razorpay_webhook, name='razorpay-webhook'),
+    
+    # Add this to the existing EnrollmentViewSet
+    path('enrollments/verify-payment/', EnrollmentViewSet.as_view({'post': 'verify_payment'}), name='enrollment-verify-payment'),
+    path('enrollments/check-status/', EnrollmentViewSet.as_view({'get': 'check_status'}), name='enrollment-check-status'),
+    
     
 ]
