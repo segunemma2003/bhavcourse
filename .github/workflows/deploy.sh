@@ -18,6 +18,7 @@ sudo systemctl start redis-server
 
 # Install/update dependencies
 pip install -r requirements.txt
+pip install razorpay
 pip install mysqlclient  # Explicitly install mysqlclient
 
 # Create .env file if it doesn't exist
