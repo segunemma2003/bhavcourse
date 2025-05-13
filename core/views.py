@@ -56,10 +56,25 @@ class CategoryViewSet(viewsets.ModelViewSet):
     
     @swagger_auto_schema(
         operation_summary="Retrieve a category",
-        operation_description="Returns the details of a specific category by ID."
+        operation_description="Returns the details of a specific category by ID along with related courses."
     )
     def retrieve(self, request, *args, **kwargs):
-        return super().retrieve(request, *args, **kwargs)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        
+        # Get courses for this category
+        courses = Course.objects.filter(category=instance)
+        course_serializer = CourseListSerializer(
+            courses, 
+            many=True, 
+            context={'request': request}
+        )
+        
+        # Combine data
+        data = serializer.data
+        data['courses'] = course_serializer.data
+        
+        return Response(data)
     
     @swagger_auto_schema(
         operation_summary="Create a category",
