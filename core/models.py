@@ -60,7 +60,7 @@ class User(AbstractBaseUser, PermissionsMixin):
 
 class Category(models.Model):
     name = models.CharField(max_length=100)
-    image_url = models.URLField()
+    image_url = models.URLField(max_length=500)
     description = models.TextField()
     
     def __str__(self):
