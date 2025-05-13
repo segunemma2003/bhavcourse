@@ -85,7 +85,7 @@ class CourseRequirement(models.Model):
 
 class CourseCurriculum(models.Model):
     title = models.CharField(max_length=100)
-    video_url = models.URLField()
+    video_url = models.URLField(max_length=500, blank=True, null=True)
     course = models.ForeignKey('Course', related_name='curriculum', on_delete=models.CASCADE)
     order = models.PositiveIntegerField(default=0)
     
