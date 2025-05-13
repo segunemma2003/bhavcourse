@@ -172,7 +172,7 @@ class PaymentCard(models.Model):
     CARD_TYPES = (
         ('VISA', 'Visa'),
         ('MASTERCARD', 'MasterCard'),
-        ('AMEX', 'American Express'),
+        ('AMERICAN EXPRESS', 'American Express'),
         ('DISCOVER', 'Discover'),
     )
     

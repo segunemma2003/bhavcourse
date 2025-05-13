@@ -252,6 +252,7 @@ class CourseCreateUpdateSerializer(serializers.ModelSerializer):
         extra_kwargs = {
             'title': {'required': False},
             'small_desc': {'required': False},
+            'description': {'required': False},
             'category': {'required': False},
             'image': {'required': False},
         }
@@ -346,7 +347,7 @@ class CourseCreateUpdateSerializer(serializers.ModelSerializer):
         
         # For creation, validate that required fields are present
         if not is_update:
-            required_fields = ['title', 'small_desc', 'category']
+            required_fields = ['title', 'small_desc', 'category', 'description']
             missing_fields = [field for field in required_fields if field not in data]
             
             if missing_fields:
