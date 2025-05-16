@@ -5,7 +5,11 @@ set -e
 cd /var/www/bhavani
 
 # Activate virtual environment
-source /var/www/bhavani/venv/bin/activate
+source venv/bin/activate
+
+# Verify we're in the virtual environment
+echo "Python path: $(which python)"
+echo "Pip path: $(which pip)"
 
 # Install MySQL client development libraries (only needed once)
 sudo apt-get update
@@ -16,10 +20,17 @@ sudo apt-get install -y redis-server
 sudo systemctl enable redis-server
 sudo systemctl start redis-server
 
-# Install/update dependencies
+# Upgrade pip within the virtual environment first
+pip install --upgrade pip
+
+# Install/update dependencies using the virtual environment's pip
 pip install -r requirements.txt
 pip install razorpay
 pip install mysqlclient  # Explicitly install mysqlclient
+
+# Verify installations
+echo "Installed packages in virtual environment:"
+pip list | grep -E "(boto3|mysqlclient|razorpay)"
 
 # Create .env file if it doesn't exist
 if [ ! -f .env ]; then
