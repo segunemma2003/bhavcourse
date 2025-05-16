@@ -33,7 +33,7 @@ DEBUG = False
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 ALLOWED_HOSTS = ['*']
-
+APPEND_SLASH=True
 
 # Application definition
 
