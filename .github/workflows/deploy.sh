@@ -5,7 +5,7 @@ set -e
 cd /var/www/bhavani
 
 # Activate virtual environment
-source venv/bin/activate
+source /var/www/bhavani/venv/bin/activate
 
 # Install MySQL client development libraries (only needed once)
 sudo apt-get update
