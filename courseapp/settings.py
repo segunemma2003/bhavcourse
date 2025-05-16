@@ -23,14 +23,19 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.environ.get('SECRET_KEY')
-
+import secrets
+SECRET_KEY = secrets.token_urlsafe(64)
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = False
+DEBUG = True
 # os.environ.get('DEBUG', 'False').lower() == 'true'
 
 load_dotenv(os.path.join(BASE_DIR, '.env'))
+
+if not DEBUG:
+    SECURE_HSTS_SECONDS = 31536000  # 1 year
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
 
 ALLOWED_HOSTS = ['*']
 APPEND_SLASH=True
@@ -95,7 +100,15 @@ if not DEBUG:
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
     
-ACCOUNT_SIGNUP_FIELDS = ['email*', 'password1', 'password2']
+ACCOUNT_SIGNUP_FIELDS = {
+    'username': {
+        'required': False,
+    },
+    'email': {
+        'required': True,
+    },
+}
+
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
