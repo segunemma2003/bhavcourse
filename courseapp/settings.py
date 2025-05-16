@@ -192,9 +192,7 @@ REST_AUTH = {
 ROOT_URLCONF = 'courseapp.urls'
 
 CORS_ALLOW_ALL_ORIGINS = True
-CORS_ALLOWED_ORIGINS = [
-    "*"
-]
+CORS_ALLOW_CREDENTIALS = True
 
 
 CELERY_BROKER_URL = os.environ.get('REDIS_URL')
