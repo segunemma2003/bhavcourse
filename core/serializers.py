@@ -1,8 +1,11 @@
+import os
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from allauth.account.adapter import get_adapter
 from allauth.account.utils import setup_user_email
 from dj_rest_auth.registration.serializers import RegisterSerializer
+
+from core.s3_utils import generate_presigned_url, is_s3_url
 from .models import (Category, ContentPage, Course, CourseObjective, CourseRequirement, CourseCurriculum, Enrollment, FCMDevice, GeneralSettings, Notification, PaymentOrder, 
                      SubscriptionPlan, PlanFeature, UserSubscription, 
                     Wishlist, PaymentCard, Purchase
@@ -19,10 +22,18 @@ User = get_user_model()
 
 
 class UserDetailsSerializer(serializers.ModelSerializer):
+    profile_picture_url = serializers.SerializerMethodField()
+    
     class Meta:
         model = User
-        fields = ['id', 'email', 'full_name', 'phone_number', 'date_of_birth']
+        fields = ['id', 'email', 'full_name', 'phone_number', 'date_of_birth', 'profile_picture_url']
         read_only_fields = ['id', 'email']
+    
+    def get_profile_picture_url(self, obj):
+        """
+        Get the profile picture URL with presigned URL for S3
+        """
+        return obj.get_profile_picture_url()
 
 
 
@@ -143,12 +154,26 @@ class CustomTokenSerializer(serializers.Serializer):
     user = UserSerializer()
 
 class ForgotPasswordSerializer(serializers.Serializer):
+    """Serializer for requesting password reset OTP"""
     email = serializers.EmailField()
-
+    
+    def validate_email(self, value):
+        """Validate that the email exists"""
+        if not User.objects.filter(email__iexact=value).exists():
+            raise serializers.ValidationError("User with this email does not exist.")
+        return value
+    
 class VerifyOTPSerializer(serializers.Serializer):
+    """Serializer for verifying OTP only"""
     email = serializers.EmailField()
-    otp = serializers.CharField(max_length=6)
-    new_password = serializers.CharField(min_length=8)
+    otp = serializers.CharField(max_length=6, min_length=4)
+    
+    def validate_email(self, value):
+        """Validate that the email exists"""
+        if not User.objects.filter(email__iexact=value).exists():
+            raise serializers.ValidationError("User with this email does not exist.")
+        return value
+    
     
 class CategorySerializer(serializers.ModelSerializer):
     class Meta:
@@ -172,13 +197,41 @@ class CourseRequirementSerializer(serializers.ModelSerializer):
         }
 
 class CourseCurriculumSerializer(serializers.ModelSerializer):
+    video_url = serializers.SerializerMethodField()
+    
     class Meta:
         model = CourseCurriculum
         fields = ['id', 'title', 'video_url', 'order']
         extra_kwargs = {
             'id': {'read_only': True}
         }
+    
+    def get_video_url(self, obj):
+        """
+        Generate a presigned URL for S3 videos
+        """
+        url = obj.video_url
+        if url and is_s3_url(url):
+            return generate_presigned_url(url)
+        return url
+    
+    def to_representation(self, instance):
+        """
+        Override to_representation to ensure video_url is properly handled
+        """
+        ret = super().to_representation(instance)
+        # Ensure video_url is properly returned even for write operations
+        if 'video_url' in ret and ret['video_url'] is None:
+            # If the URL is None in the database, return None
+            ret['video_url'] = None
+        return ret
 
+    def to_internal_value(self, data):
+        """
+        Keep the original URL when saving to database
+        """
+        # Store the original URL in internal value - don't try to save presigned URL
+        return super().to_internal_value(data)
 
 class CourseListSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source='category.name', read_only=True)
@@ -208,7 +261,7 @@ class CourseListSerializer(serializers.ModelSerializer):
 
 class CourseDetailSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source='category.name', read_only=True)
-    enrolled_students = serializers.IntegerField(read_only=True)
+    enrolled_students = serializers.SerializerMethodField(read_only=True)
     objectives = CourseObjectiveSerializer(many=True, read_only=True)
     requirements = CourseRequirementSerializer(many=True, read_only=True)
     curriculum = CourseCurriculumSerializer(many=True, read_only=True)
@@ -223,6 +276,9 @@ class CourseDetailSerializer(serializers.ModelSerializer):
             'location', 'enrolled_students', 'objectives',
             'requirements', 'curriculum', 'is_enrolled', 'is_wishlisted'
         ]
+    
+    def get_enrolled_students(self, obj):
+        return obj.enrollments.count()
     
     def get_is_enrolled(self, obj):
         request = self.context.get('request')
@@ -462,6 +518,7 @@ class CourseCreateUpdateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Category does not exist.")
 
 class EnrollmentSerializer(serializers.ModelSerializer):
+    course = CourseDetailSerializer(read_only=True)
     class Meta:
         model = Enrollment
         fields = ['id', 'course', 'date_enrolled']
@@ -576,19 +633,19 @@ class PaymentCardSerializer(serializers.ModelSerializer):
 class PurchaseSerializer(serializers.ModelSerializer):
     course_title = serializers.CharField(source='course.title', read_only=True)
     course_image = serializers.ImageField(source='course.image', read_only=True)
+    plan_name = serializers.CharField(source='plan.name', read_only=True)
     card_last_four = serializers.CharField(source='payment_card.last_four', read_only=True)
     
     class Meta:
         model = Purchase
         fields = [
-            'id', 'course', 'course_title', 'course_image', 
-            'payment_card', 'card_last_four', 'amount', 
-            'purchase_date', 'transaction_id', 'payment_status',
+            'id', 'course', 'course_title', 'course_image',
+            'plan', 'plan_name', 'payment_card', 'card_last_four', 
+            'amount', 'purchase_date', 'transaction_id', 'payment_status',
             'razorpay_order_id', 'razorpay_payment_id'
         ]
         read_only_fields = ['purchase_date', 'transaction_id', 'payment_status',
                           'razorpay_order_id', 'razorpay_payment_id']
-
 # Update UserSerializer to include date_of_birth
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
@@ -623,38 +680,7 @@ class CourseListSerializer(serializers.ModelSerializer):
             return Wishlist.objects.filter(user=request.user, course=obj).exists()
         return False
 
-class CourseDetailSerializer(serializers.ModelSerializer):
-    category_name = serializers.CharField(source='category.name', read_only=True)
-    enrolled_students = serializers.SerializerMethodField(read_only=True)
-    objectives = CourseObjectiveSerializer(many=True, read_only=True)
-    requirements = CourseRequirementSerializer(many=True, read_only=True)
-    curriculum = CourseCurriculumSerializer(many=True, read_only=True)
-    is_enrolled = serializers.SerializerMethodField()
-    is_wishlisted = serializers.SerializerMethodField()
-    
-    class Meta:
-        model = Course
-        fields = [
-            'id', 'title', 'image', 'small_desc','description', 'category', 
-            'category_name', 'is_featured', 'date_uploaded', 
-            'location', 'enrolled_students', 'objectives',
-            'requirements', 'curriculum', 'is_enrolled', 'is_wishlisted'
-        ]
-    
-    def get_enrolled_students(self, obj):
-        return obj.enrollments.count()
-    
-    def get_is_enrolled(self, obj):
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            return obj.enrollments.filter(user=request.user).exists()
-        return False
-    
-    def get_is_wishlisted(self, obj):
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            return obj.wishlisted_by.filter(user=request.user).exists()
-        return False
+
     
 
 class NotificationSerializer(serializers.ModelSerializer):
@@ -701,11 +727,11 @@ class PaymentOrderSerializer(serializers.ModelSerializer):
         model = PaymentOrder
         fields = [
             'id', 'course', 'course_title', 'plan', 'plan_name', 
-            'amount', 'razorpay_order_id', 'status',
-            'created_at', 'updated_at'
+            'amount', 'razorpay_order_id', 'razorpay_payment_id',
+            'razorpay_signature', 'status', 'created_at', 'updated_at'
         ]
         read_only_fields = ['razorpay_order_id', 'status', 'created_at', 'updated_at']
-
+        
 class CreateOrderSerializer(serializers.Serializer):
     course_id = serializers.IntegerField()
     plan_id = serializers.IntegerField()
@@ -739,3 +765,132 @@ class VerifyPaymentSerializer(serializers.Serializer):
     razorpay_payment_id = serializers.CharField()
     razorpay_order_id = serializers.CharField()
     razorpay_signature = serializers.CharField()
+
+
+
+class PurchaseCourseSerializer(serializers.Serializer):
+    course_id = serializers.IntegerField()
+    plan_id = serializers.IntegerField()
+    razorpay_payment_id = serializers.CharField()
+    razorpay_order_id = serializers.CharField()
+    razorpay_signature = serializers.CharField()
+    payment_card_id = serializers.IntegerField(required=False, allow_null=True)
+    
+    def validate_course_id(self, value):
+        try:
+            Course.objects.get(pk=value)
+            return value
+        except Course.DoesNotExist:
+            raise serializers.ValidationError("Course does not exist")
+    
+    def validate_plan_id(self, value):
+        try:
+            SubscriptionPlan.objects.get(pk=value)
+            return value
+        except SubscriptionPlan.DoesNotExist:
+            raise serializers.ValidationError("Subscription plan does not exist")
+    
+    # def validate_payment_card_id(self, value):
+    #     if value is None:
+    #         return None
+    #     try:
+    #         PaymentCard.objects.get(pk=value)
+    #         return value
+    #     except PaymentCard.DoesNotExist:
+    #         raise serializers.ValidationError("Payment card does not exist")
+    
+    
+    
+class UserProfilePictureSerializer(serializers.ModelSerializer):
+    profile_picture_url = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = User
+        fields = ['id', 'profile_picture', 'profile_picture_url']
+        extra_kwargs = {
+            'profile_picture': {'write_only': True}
+        }
+    
+    def get_profile_picture_url(self, obj):
+        """
+        Get the profile picture URL with presigned URL for S3
+        """
+        return obj.get_profile_picture_url()
+
+class UserProfilePictureUploadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ['profile_picture']
+    
+    def validate_profile_picture(self, value):
+        """
+        Backend validation of uploaded file
+        """
+        # File size validation (5MB limit)
+        max_size = 5 * 1024 * 1024  # 5MB
+        if value.size > max_size:
+            raise serializers.ValidationError(
+                f"File size {value.size} bytes exceeds maximum allowed size of {max_size} bytes (5MB)"
+            )
+        
+        # File type validation
+        allowed_mime_types = [
+            'image/jpeg', 
+            'image/jpg', 
+            'image/png', 
+            'image/gif', 
+            'image/webp'
+        ]
+        
+        if value.content_type not in allowed_mime_types:
+            raise serializers.ValidationError(
+                f"Unsupported file type: {value.content_type}. "
+                f"Allowed types: {', '.join(allowed_mime_types)}"
+            )
+        
+        # Validate that it's actually an image
+        try:
+            from PIL import Image
+            # Try to open the image to ensure it's valid
+            img = Image.open(value)
+            img.verify()  # Verify it's a valid image
+            value.seek(0)  # Reset file pointer after verification
+        except Exception as e:
+            raise serializers.ValidationError(f"Invalid image file: {str(e)}")
+        
+        # File name validation
+        if not value.name:
+            raise serializers.ValidationError("File must have a name")
+        
+        # Check for potentially dangerous file extensions
+        dangerous_extensions = ['.php', '.asp', '.jsp', '.exe', '.bat', '.sh']
+        file_extension = os.path.splitext(value.name)[1].lower()
+        if file_extension in dangerous_extensions:
+            raise serializers.ValidationError(f"File extension {file_extension} not allowed")
+        
+        return value
+    
+class ResetPasswordSerializer(serializers.Serializer):
+    """Serializer for resetting password with verified OTP"""
+    email = serializers.EmailField()
+    otp = serializers.CharField(max_length=6, min_length=4)
+    new_password = serializers.CharField(min_length=8)
+    confirm_password = serializers.CharField(min_length=8)
+    
+    def validate_email(self, value):
+        """Validate that the email exists"""
+        if not User.objects.filter(email__iexact=value).exists():
+            raise serializers.ValidationError("User with this email does not exist.")
+        return value
+    
+    def validate(self, data):
+        """Validate that passwords match"""
+        if data['new_password'] != data['confirm_password']:
+            raise serializers.ValidationError("Passwords do not match.")
+        return data
+    
+    def validate_otp(self, value):
+        """Basic OTP validation"""
+        if not value.isdigit():
+            raise serializers.ValidationError("OTP must contain only numbers.")
+        return value

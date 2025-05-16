@@ -4,7 +4,7 @@ from rest_framework.permissions import AllowAny
 from django.contrib.auth import get_user_model
 from django.core.mail import send_mail
 from django.conf import settings
-from .serializers import CustomLoginSerializer, CustomRegisterSerializer, ForgotPasswordSerializer, UserDetailsSerializer, VerifyOTPSerializer
+from .serializers import CustomLoginSerializer, CustomRegisterSerializer, ForgotPasswordSerializer, ResetPasswordSerializer, UserDetailsSerializer, VerifyOTPSerializer
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from allauth.socialaccount.providers.google.views import GoogleOAuth2Adapter
@@ -23,14 +23,15 @@ User = get_user_model()
 
 class ForgotPasswordView(generics.GenericAPIView):
     """
-    API endpoint for initiating password reset.
+    API endpoint for requesting password reset OTP.
+    Step 1: Send OTP to email
     """
     permission_classes = [AllowAny]
     serializer_class = ForgotPasswordSerializer
     
     @swagger_auto_schema(
         operation_summary="Request password reset OTP",
-        operation_description="Sends a one-time password (OTP) to the user's email for password reset.",
+        operation_description="Sends a one-time password (OTP) to the user's email for password reset. The OTP is valid for 10 minutes.",
         request_body=ForgotPasswordSerializer,
         responses={
             status.HTTP_200_OK: openapi.Response(
@@ -38,7 +39,8 @@ class ForgotPasswordView(generics.GenericAPIView):
                 schema=openapi.Schema(
                     type=openapi.TYPE_OBJECT,
                     properties={
-                        'message': openapi.Schema(type=openapi.TYPE_STRING)
+                        'message': openapi.Schema(type=openapi.TYPE_STRING),
+                        'otp_expires_in': openapi.Schema(type=openapi.TYPE_STRING)
                     }
                 )
             ),
@@ -50,8 +52,10 @@ class ForgotPasswordView(generics.GenericAPIView):
                         'error': openapi.Schema(type=openapi.TYPE_STRING)
                     }
                 )
-            )
-        }
+            ),
+            status.HTTP_400_BAD_REQUEST: "Invalid email format"
+        },
+        tags=['Authentication']
     )
     def post(self, request):
         serializer = self.get_serializer(data=request.data)
@@ -59,37 +63,68 @@ class ForgotPasswordView(generics.GenericAPIView):
         email = serializer.validated_data['email']
         
         try:
-            user = User.objects.get(email=email)
+            user = User.objects.get(email__iexact=email)
             otp = user.generate_otp()
             
             # Send OTP via email
             subject = 'Password Reset OTP'
-            message = f'Your OTP for password reset is: {otp}. This OTP is valid for 10 minutes.'
-            send_mail(subject, message, settings.EMAIL_HOST_USER, [email])
+            message = f'''
+            Hello {user.full_name},
             
-            return Response({'message': 'OTP sent to your email'}, status=status.HTTP_200_OK)
+            You requested a password reset for your account.
+            
+            Your OTP for password reset is: {otp}
+            
+            This OTP is valid for 10 minutes.
+            
+            If you didn't request this, please ignore this email.
+            
+            Best regards,
+            The Course App Team
+            '''
+            
+            send_mail(subject, message, settings.EMAIL_HOST_USER, [email])
+            logger.info(f"Password reset OTP sent to {email}")
+            
+            return Response({
+                'message': 'OTP sent to your email successfully',
+                'otp_expires_in': '10 minutes'
+            }, status=status.HTTP_200_OK)
+            
         except User.DoesNotExist:
-            return Response({'error': 'User with this email does not exist'}, status=status.HTTP_404_NOT_FOUND)
-
+            logger.warning(f"Password reset attempted for non-existent email: {email}")
+            return Response(
+                {'error': 'User with this email does not exist'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            logger.error(f"Error sending OTP to {email}: {str(e)}")
+            return Response(
+                {'error': 'Failed to send OTP. Please try again later.'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+            
 # VerifyOTPView
 class VerifyOTPView(generics.GenericAPIView):
     """
-    API endpoint for verifying OTP and resetting password.
+    API endpoint for verifying OTP.
+    Step 2: Verify the OTP sent to email
     """
     permission_classes = [AllowAny]
     serializer_class = VerifyOTPSerializer
     
     @swagger_auto_schema(
-        operation_summary="Verify OTP and reset password",
-        operation_description="Verifies the OTP sent to the user's email and resets the password.",
+        operation_summary="Verify password reset OTP",
+        operation_description="Verifies the OTP sent to the user's email. Call this before attempting to reset the password.",
         request_body=VerifyOTPSerializer,
         responses={
             status.HTTP_200_OK: openapi.Response(
-                description="Password reset successful",
+                description="OTP verified successfully",
                 schema=openapi.Schema(
                     type=openapi.TYPE_OBJECT,
                     properties={
-                        'message': openapi.Schema(type=openapi.TYPE_STRING)
+                        'message': openapi.Schema(type=openapi.TYPE_STRING),
+                        'otp_verified': openapi.Schema(type=openapi.TYPE_BOOLEAN)
                     }
                 )
             ),
@@ -111,7 +146,88 @@ class VerifyOTPView(generics.GenericAPIView):
                     }
                 )
             )
-        }
+        },
+        tags=['Authentication']
+    )
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        email = serializer.validated_data['email']
+        otp = serializer.validated_data['otp']
+        
+        try:
+            user = User.objects.get(email__iexact=email)
+            
+            if user.verify_otp(otp):
+                logger.info(f"OTP verified successfully for {email}")
+                return Response({
+                    'message': 'OTP verified successfully',
+                    'otp_verified': True
+                }, status=status.HTTP_200_OK)
+            else:
+                logger.warning(f"Invalid or expired OTP for {email}")
+                return Response(
+                    {'error': 'Invalid or expired OTP'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+                
+        except User.DoesNotExist:
+            logger.warning(f"OTP verification attempted for non-existent email: {email}")
+            return Response(
+                {'error': 'User with this email does not exist'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            logger.error(f"Error verifying OTP for {email}: {str(e)}")
+            return Response(
+                {'error': 'An error occurred while verifying OTP'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+class ResetPasswordView(generics.GenericAPIView):
+    """
+    API endpoint for resetting password with verified OTP.
+    Step 3: Reset password using email, verified OTP, and new password
+    """
+    permission_classes = [AllowAny]
+    serializer_class = ResetPasswordSerializer
+    
+    @swagger_auto_schema(
+        operation_summary="Reset password with verified OTP",
+        operation_description="Resets the user's password using the verified OTP. The OTP must be verified before calling this endpoint.",
+        request_body=ResetPasswordSerializer,
+        responses={
+            status.HTTP_200_OK: openapi.Response(
+                description="Password reset successful",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'message': openapi.Schema(type=openapi.TYPE_STRING),
+                        'password_reset': openapi.Schema(type=openapi.TYPE_BOOLEAN)
+                    }
+                )
+            ),
+            status.HTTP_400_BAD_REQUEST: openapi.Response(
+                description="Invalid data or OTP not verified",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'error': openapi.Schema(type=openapi.TYPE_STRING)
+                    }
+                )
+            ),
+            status.HTTP_404_NOT_FOUND: openapi.Response(
+                description="User not found",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'error': openapi.Schema(type=openapi.TYPE_STRING)
+                    }
+                )
+            )
+        },
+        tags=['Authentication']
     )
     def post(self, request):
         serializer = self.get_serializer(data=request.data)
@@ -122,15 +238,73 @@ class VerifyOTPView(generics.GenericAPIView):
         new_password = serializer.validated_data['new_password']
         
         try:
-            user = User.objects.get(email=email)
-            if user.verify_otp(otp):
-                user.set_password(new_password)
-                user.save()
-                return Response({'message': 'Password reset successful'}, status=status.HTTP_200_OK)
-            else:
-                return Response({'error': 'Invalid or expired OTP'}, status=status.HTTP_400_BAD_REQUEST)
+            user = User.objects.get(email__iexact=email)
+            
+            # Check if the provided OTP matches and is verified
+            if not user.otp_verified:
+                logger.warning(f"Attempt to reset password with unverified OTP for {email}")
+                return Response(
+                    {'error': 'OTP not verified. Please verify OTP first.'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Double-check the OTP matches (security measure)
+            if user.otp != otp:
+                logger.warning(f"OTP mismatch during password reset for {email}")
+                return Response(
+                    {'error': 'Invalid OTP'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Check if OTP hasn't expired
+            if user.otp_expiry and timezone.now() > user.otp_expiry:
+                logger.warning(f"Expired OTP used for password reset for {email}")
+                user.clear_otp()  # Clear expired OTP
+                return Response(
+                    {'error': 'OTP has expired. Please request a new one.'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Reset the password
+            user.set_password(new_password)
+            user.clear_otp()  # Clear OTP after successful password reset
+            
+            # Send confirmation email
+            subject = 'Password Reset Successful'
+            message = f'''
+            Hello {user.full_name},
+            
+            Your password has been successfully reset.
+            
+            If you didn't make this change, please contact us immediately.
+            
+            Best regards,
+            The Course App Team
+            '''
+            
+            try:
+                send_mail(subject, message, settings.EMAIL_HOST_USER, [email])
+            except Exception as email_error:
+                logger.error(f"Failed to send confirmation email to {email}: {str(email_error)}")
+                # Don't fail the password reset if email sending fails
+            
+            logger.info(f"Password reset successful for {email}")
+            return Response({
+                'message': 'Password reset successful',
+                'password_reset': True
+            }, status=status.HTTP_200_OK)
+            
         except User.DoesNotExist:
-            return Response({'error': 'User with this email does not exist'}, status=status.HTTP_404_NOT_FOUND)
+            logger.warning(f"Password reset attempted for non-existent email: {email}")
+            return Response(
+                {'error': 'User with this email does not exist'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            logger.error(f"Error resetting password for {email}: {str(e)}")
+            return Response(
+                {'error': 'An error occurred while resetting password'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
 class GoogleLoginView(SocialLoginView):
     """

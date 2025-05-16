@@ -37,18 +37,63 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
     date_joined = models.DateTimeField(auto_now_add=True)
+    profile_picture = models.ImageField(
+        upload_to='profile_pictures/', 
+        blank=True, 
+        null=True,
+        help_text="User's profile picture"
+    )
     
     objects = CustomUserManager()
     
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['full_name', 'phone_number']
     
+    
+    profile_picture = models.ImageField(
+        upload_to='profile_pictures/', 
+        blank=True, 
+        null=True,
+        help_text="User's profile picture"
+    )
+    
     def generate_otp(self):
-        otp = ''.join(random.choices(string.digits, k=6))
+        otp = ''.join(random.choices(string.digits, k=4))
         self.otp = otp
         self.otp_expiry = timezone.now() + timezone.timedelta(minutes=10)
         self.save()
         return otp
+    
+    def clear_otp(self):
+        """
+        Clear OTP after successful password reset
+        """
+        self.otp = None
+        self.otp_expiry = None
+        self.otp_verified = False
+        self.save()
+    
+    def get_profile_picture_url(self):
+        """
+        Generate a URL for the profile picture.
+        If you're using S3, this will generate a presigned URL.
+        If using local storage, returns the regular URL.
+        """
+        if self.profile_picture:
+            # If you have S3 integration, uncomment these lines:
+            # try:
+            #     from core.s3_utils import generate_presigned_url, is_s3_url
+            #     url = self.profile_picture.url
+            #     if is_s3_url(url):
+            #         return generate_presigned_url(url)
+            #     return url
+            # except ImportError:
+            #     # Fallback if S3 utils not available
+            #     return self.profile_picture.url
+            
+            # For now, return the regular URL
+            return self.profile_picture.url
+        return None
         
     def verify_otp(self, otp):
         if self.otp == otp and timezone.now() <= self.otp_expiry:
@@ -188,9 +233,10 @@ class PaymentCard(models.Model):
         return f"{self.card_type} **** **** **** {self.last_four}"
 
 class Purchase(models.Model):
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='purchases', on_delete=models.CASCADE)
-    course = models.ForeignKey(Course, related_name='purchases', on_delete=models.CASCADE)
-    payment_card = models.ForeignKey(PaymentCard, related_name='purchases', on_delete=models.SET_NULL, null=True)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='purchases', on_delete=models.SET_NULL, null=True, blank=True)
+    course = models.ForeignKey(Course, related_name='purchases', on_delete=models.SET_NULL, null=True, blank=True)
+    payment_card = models.ForeignKey(PaymentCard, related_name='purchases', on_delete=models.SET_NULL, null=True, blank=True)  # Made nullable
+    plan = models.ForeignKey(SubscriptionPlan, related_name='purchases', on_delete=models.SET_NULL, null=True, blank=True)  # Added plan reference
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     purchase_date = models.DateTimeField(auto_now_add=True)
     transaction_id = models.CharField(max_length=100, unique=True)
@@ -285,9 +331,9 @@ class GeneralSettings(models.Model):
         return settings
     
 class PaymentOrder(models.Model):
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='payment_orders', on_delete=models.CASCADE)
-    course = models.ForeignKey(Course, related_name='payment_orders', on_delete=models.CASCADE, null=True, blank=True)
-    plan = models.ForeignKey('SubscriptionPlan', related_name='payment_orders', on_delete=models.CASCADE)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='payment_orders',on_delete=models.SET_NULL, null=True, blank=True)
+    course = models.ForeignKey(Course, related_name='payment_orders',on_delete=models.SET_NULL, null=True, blank=True)  # Made required
+    plan = models.ForeignKey('SubscriptionPlan', related_name='payment_orders', on_delete=models.SET_NULL, null=True, blank=True)
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     razorpay_order_id = models.CharField(max_length=100, unique=True)
     razorpay_payment_id = models.CharField(max_length=100, blank=True, null=True)

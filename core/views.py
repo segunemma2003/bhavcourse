@@ -7,9 +7,14 @@ from django.utils import timezone
 from django.core.mail import send_mail
 from django.conf import settings
 from django.db.models import Q
+from .services import RazorpayService,  process_course_purchase
 from .tasks import send_push_notification
 from django.db import transaction
 import csv
+from rest_framework.parsers import MultiPartParser, FormParser
+from django.core.files.storage import default_storage
+from django.core.files.base import ContentFile
+from PIL import Image
 from django.db import models
 import io
 import uuid
@@ -21,7 +26,7 @@ from .models import (
 from .serializers import (
     CourseCurriculumSerializer, CourseListSerializer, CourseDetailSerializer, CategorySerializer,
     CourseCreateUpdateSerializer, CourseObjectiveSerializer, CourseRequirementSerializer, CreateOrderSerializer, EnrollmentSerializer, FCMDeviceSerializer, 
-    NotificationSerializer, SubscriptionPlanSerializer, SubscriptionPlanCreateUpdateSerializer,
+    NotificationSerializer, PurchaseCourseSerializer, SubscriptionPlanSerializer, SubscriptionPlanCreateUpdateSerializer, UserDetailsSerializer, UserProfilePictureSerializer, UserProfilePictureUploadSerializer,
     UserSubscriptionSerializer, VerifyPaymentSerializer, WishlistSerializer, 
     PaymentCardSerializer, PurchaseSerializer, UserSerializer,
     ForgotPasswordSerializer, VerifyOTPSerializer
@@ -31,6 +36,10 @@ from drf_yasg import openapi
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 import json
+from io import BytesIO
+import logging
+
+logger = logging.getLogger(__name__)
 
 User = get_user_model()
 
@@ -1274,42 +1283,14 @@ class PurchaseViewSet(viewsets.ModelViewSet):
     def retrieve(self, request, *args, **kwargs):
         return super().retrieve(request, *args, **kwargs)
     
-    @swagger_auto_schema(
-        operation_summary="Purchase a course",
-        operation_description="Purchases a course and enrolls the user. Requires an active subscription.",
-        request_body=PurchaseSerializer
-    )
+    # Remove the old create method since purchase is now handled by CoursePurchaseView
     def create(self, request, *args, **kwargs):
-        # Check if user has an active subscription
-        has_subscription = UserSubscription.objects.filter(
-            user=request.user,
-            is_active=True,
-            end_date__gt=timezone.now()
-        ).exists()
-        
-        if not has_subscription:
-            return Response(
-                {'error': 'You need an active subscription to purchase courses'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
-        # Generate a transaction ID
-        transaction_id = str(uuid.uuid4())
-        
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        serializer.save(
-            user=request.user,
-            transaction_id=transaction_id
+        return Response(
+            {
+                'error': 'Direct purchase creation is not allowed. Use /courses/purchase/ endpoint instead.'
+            },
+            status=status.HTTP_405_METHOD_NOT_ALLOWED
         )
-        
-        # Create enrollment after purchase
-        course_id = request.data.get('course')
-        if not Enrollment.objects.filter(user=request.user, course_id=course_id).exists():
-            Enrollment.objects.create(user=request.user, course_id=course_id)
-        
-        headers = self.get_success_headers(serializer.data)
-        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
 class UpdateProfileView(generics.UpdateAPIView):
     """
@@ -2034,4 +2015,406 @@ class CourseCurriculumViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
     
     
+class CoursePurchaseView(generics.CreateAPIView):
+    """
+    API endpoint for purchasing courses with Razorpay payment verification.
+    """
+    serializer_class = PurchaseCourseSerializer
+    permission_classes = [permissions.IsAuthenticated]
     
+    @swagger_auto_schema(
+        operation_summary="Purchase a course",
+        operation_description="""
+        Purchase a course with Razorpay payment verification.
+        
+        This endpoint:
+        1. Verifies the Razorpay payment signature
+        2. Creates a Purchase record with COMPLETED status
+        3. Creates/updates UserSubscription (deactivates old, creates new)
+        4. Creates enrollment for the course
+        5. Updates PaymentOrder status or creates new one
+        6. Creates notifications for purchase and enrollment
+        7. Schedules subscription expiry reminder (3 days before)
+        
+        Payment flow:
+        1. Create order using /payments/create-order/
+        2. Process payment on frontend with Razorpay
+        3. Call this endpoint with payment details to complete purchase
+        """,
+        request_body=PurchaseCourseSerializer,
+        responses={
+            status.HTTP_201_CREATED: openapi.Response(
+                description="Course purchased successfully",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'message': openapi.Schema(type=openapi.TYPE_STRING),
+                        'purchase': openapi.Schema(
+                            type=openapi.TYPE_OBJECT,
+                            properties={
+                                'id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                'transaction_id': openapi.Schema(type=openapi.TYPE_STRING),
+                                'amount': openapi.Schema(type=openapi.TYPE_NUMBER),
+                                'payment_status': openapi.Schema(type=openapi.TYPE_STRING)
+                            }
+                        ),
+                        'subscription': openapi.Schema(
+                            type=openapi.TYPE_OBJECT,
+                            properties={
+                                'id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                'plan_name': openapi.Schema(type=openapi.TYPE_STRING),
+                                'start_date': openapi.Schema(type=openapi.TYPE_STRING, format='date-time'),
+                                'end_date': openapi.Schema(type=openapi.TYPE_STRING, format='date-time'),
+                                'is_active': openapi.Schema(type=openapi.TYPE_BOOLEAN)
+                            }
+                        ),
+                        'enrollment_id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                        'payment_order_id': openapi.Schema(type=openapi.TYPE_INTEGER)
+                    }
+                )
+            ),
+            status.HTTP_400_BAD_REQUEST: openapi.Response(
+                description="Invalid request data or payment verification failed",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'error': openapi.Schema(type=openapi.TYPE_STRING),
+                        'details': openapi.Schema(type=openapi.TYPE_OBJECT)
+                    }
+                )
+            ),
+            status.HTTP_404_NOT_FOUND: "Course or plan not found"
+        },
+        tags=['Payments']
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        # Extract validated data
+        course_id = serializer.validated_data['course_id']
+        plan_id = serializer.validated_data['plan_id']
+        payment_card_id = serializer.validated_data.get('payment_card_id')
+        razorpay_payment_id = serializer.validated_data['razorpay_payment_id']
+        razorpay_order_id = serializer.validated_data['razorpay_order_id']
+        razorpay_signature = serializer.validated_data['razorpay_signature']
+        
+        try:
+            # Get objects
+            course = Course.objects.get(pk=course_id)
+            plan = SubscriptionPlan.objects.get(pk=plan_id)
+            payment_card = PaymentCard.objects.get(pk=payment_card_id) if payment_card_id else None
+            
+            # Verify payment card belongs to user if provided
+            if payment_card and payment_card.user != request.user:
+                return Response(
+                    {'error': 'Payment card does not belong to you'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Process purchase using RazorpayService
+            razorpay_service = RazorpayService()
+            
+            with transaction.atomic():
+                result = process_course_purchase(
+                    user=request.user,
+                    course=course,
+                    plan=plan,
+                    razorpay_payment_id=razorpay_payment_id,
+                    razorpay_order_id=razorpay_order_id,
+                    razorpay_signature=razorpay_signature,
+                    payment_card=payment_card
+                )
+            
+            # Prepare response data
+            response_data = {
+                'message': result['message'],
+                'purchase': {
+                    'id': result['purchase'].id,
+                    'transaction_id': result['purchase'].transaction_id,
+                    'amount': result['purchase'].amount,
+                    'payment_status': result['purchase'].payment_status
+                },
+                'subscription': {
+                    'id': result['subscription'].id,
+                    'plan_name': result['subscription'].plan.name,
+                    'start_date': result['subscription'].start_date,
+                    'end_date': result['subscription'].end_date,
+                    'is_active': result['subscription'].is_active
+                },
+                'enrollment_id': result['enrollment'].id,
+                'payment_order_id': result['payment_order'].id
+            }
+            
+            
+            return Response({"success":True, "data":response_data}, status=status.HTTP_201_CREATED)
+            
+        except Course.DoesNotExist:
+            return Response(
+                {'error': 'Course not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except SubscriptionPlan.DoesNotExist:
+            return Response(
+                {'error': 'Subscription plan not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except PaymentCard.DoesNotExist:
+            return Response(
+                {'error': 'Payment card not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except ValueError as ve:
+            # Payment verification failed
+            return Response(
+                {'error': str(ve)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            # logger.error(f"Course purchase failed: {str(e)}")
+            return Response(
+                {'error': 'Purchase failed', 'details': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+class ProfilePictureUploadView(generics.UpdateAPIView):
+    """
+    API endpoint for uploading user profile picture.
+    Backend handles all file processing, validation, and storage.
+    """
+    serializer_class = UserProfilePictureUploadSerializer
+    parser_classes = [MultiPartParser, FormParser]  # Handles file uploads
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_object(self):
+        return self.request.user
+    
+    def process_uploaded_image(self, uploaded_file):
+        """
+        Backend processing of uploaded image:
+        1. Validates file
+        2. Resizes image if needed
+        3. Converts to optimized format
+        4. Generates unique filename
+        5. Saves to storage (S3 or local)
+        """
+        try:
+            # Open image using PIL
+            image = Image.open(uploaded_file)
+            
+            # Convert to RGB if necessary (handles RGBA, P mode images)
+            if image.mode in ('RGBA', 'P'):
+                # Create white background
+                background = Image.new('RGB', image.size, (255, 255, 255))
+                if image.mode == 'P':
+                    image = image.convert('RGBA')
+                background.paste(image, mask=image.split()[-1] if image.mode == 'RGBA' else None)
+                image = background
+            
+            # Resize image if too large (maintain aspect ratio)
+            max_size = (800, 800)  # Max 800x800 pixels
+            if image.size[0] > max_size[0] or image.size[1] > max_size[1]:
+                image.thumbnail(max_size, Image.Resampling.LANCZOS)
+            
+            # Generate unique filename
+            unique_id = uuid.uuid4().hex
+            filename = f"profile_pictures/{unique_id}.jpg"
+            
+            # Save processed image to BytesIO
+            output = BytesIO()
+            image.save(output, format='JPEG', quality=90, optimize=True)
+            output.seek(0)
+            
+            # Create ContentFile for Django storage
+            content_file = ContentFile(output.read(), name=filename)
+            
+            logger.info(f"Processed image for user {self.request.user.id}: {filename}")
+            return content_file, filename
+            
+        except Exception as e:
+            logger.error(f"Error processing image: {str(e)}")
+            raise serializers.ValidationError(f"Error processing image: {str(e)}")
+    
+    def patch(self, request, *args, **kwargs):
+        """
+        Backend handles the entire upload process:
+        1. Receives multipart file
+        2. Validates file
+        3. Processes and optimizes image
+        4. Deletes old profile picture
+        5. Saves new file to storage
+        6. Updates user record
+        7. Returns secure URL
+        """
+        user = self.get_object()
+        
+        # Check if file was uploaded
+        if 'profile_picture' not in request.FILES:
+            return Response(
+                {'error': 'No file uploaded'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        uploaded_file = request.FILES['profile_picture']
+        
+        # Backend validation
+        try:
+            # Process the uploaded image
+            processed_file, filename = self.process_uploaded_image(uploaded_file)
+            
+            # Delete old profile picture if exists
+            if user.profile_picture:
+                old_file_path = user.profile_picture.name
+                if default_storage.exists(old_file_path):
+                    default_storage.delete(old_file_path)
+                    logger.info(f"Deleted old profile picture: {old_file_path}")
+            
+            # Save new processed file
+            saved_path = default_storage.save(filename, processed_file)
+            
+            # Update user profile picture field
+            user.profile_picture = saved_path
+            user.save()
+            
+            logger.info(f"Profile picture saved for user {user.id}: {saved_path}")
+            
+            # Generate secure URL for response
+            profile_picture_url = user.get_profile_picture_url()
+            
+            return Response({
+                'message': 'Profile picture uploaded and processed successfully',
+                'profile_picture_url': profile_picture_url,
+                'file_size': default_storage.size(saved_path),
+                'file_path': saved_path
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"Upload failed for user {user.id}: {str(e)}")
+            return Response(
+                {'error': f'Upload failed: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+class ProfilePictureRetrieveView(generics.RetrieveAPIView):
+    """
+    API endpoint for retrieving user profile picture.
+    """
+    serializer_class = UserProfilePictureSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_object(self):
+        return self.request.user
+    
+    @swagger_auto_schema(
+        operation_summary="Get profile picture",
+        operation_description="Retrieve the authenticated user's profile picture URL.",
+        responses={
+            status.HTTP_200_OK: UserProfilePictureSerializer(),
+            status.HTTP_404_NOT_FOUND: "Profile picture not found"
+        }
+    )
+    def get(self, request, *args, **kwargs):
+        user = self.get_object()
+        serializer = self.get_serializer(user)
+        return Response(serializer.data)
+
+class ProfilePictureDeleteView(generics.DestroyAPIView):
+    """
+    API endpoint for deleting user profile picture.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_object(self):
+        return self.request.user
+    
+    @swagger_auto_schema(
+        operation_summary="Delete profile picture",
+        operation_description="Delete the authenticated user's profile picture.",
+        responses={
+            status.HTTP_204_NO_CONTENT: "Profile picture deleted successfully",
+            status.HTTP_404_NOT_FOUND: "Profile picture not found"
+        }
+    )
+    def delete(self, request, *args, **kwargs):
+        user = self.get_object()
+        
+        if user.profile_picture:
+            # Delete the file
+            user.profile_picture.delete(save=True)
+            return Response(
+                {'message': 'Profile picture deleted successfully'}, 
+                status=status.HTTP_204_NO_CONTENT
+            )
+        else:
+            return Response(
+                {'error': 'No profile picture found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+class UserProfileView(generics.RetrieveUpdateAPIView):
+    """
+    API endpoint for retrieving and updating user profile with profile picture.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+    
+    def get_object(self):
+        return self.request.user
+    
+    def get_serializer_class(self):
+        if self.request.method == 'GET':
+            return UserDetailsSerializer
+        return UserProfilePictureUploadSerializer
+    
+    @swagger_auto_schema(
+        operation_summary="Get user profile",
+        operation_description="Retrieve complete user profile including profile picture.",
+        responses={
+            status.HTTP_200_OK: UserDetailsSerializer()
+        }
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+    
+    @swagger_auto_schema(
+        operation_summary="Update user profile with picture",
+        operation_description="Update user profile including profile picture upload.",
+        manual_parameters=[
+            openapi.Parameter(
+                'profile_picture', 
+                openapi.IN_FORM, 
+                description="Profile picture file (optional)", 
+                type=openapi.TYPE_FILE,
+                required=False
+            )
+        ],
+        responses={
+            status.HTTP_200_OK: UserDetailsSerializer(),
+            status.HTTP_400_BAD_REQUEST: "Invalid data"
+        }
+    )
+    def patch(self, request, *args, **kwargs):
+        user = self.get_object()
+        
+        # Handle profile picture upload if provided
+        if 'profile_picture' in request.data:
+            pic_serializer = UserProfilePictureUploadSerializer(
+                user, 
+                data={'profile_picture': request.data['profile_picture']}, 
+                partial=True
+            )
+            pic_serializer.is_valid(raise_exception=True)
+            pic_serializer.save()
+        
+        # Handle other profile fields
+        other_data = {k: v for k, v in request.data.items() if k != 'profile_picture'}
+        if other_data:
+            profile_serializer = UserDetailsSerializer(user, data=other_data, partial=True)
+            profile_serializer.is_valid(raise_exception=True)
+            profile_serializer.save()
+        
+        # Return updated profile
+        return Response(
+            UserDetailsSerializer(user).data,
+            status=status.HTTP_200_OK
+        )

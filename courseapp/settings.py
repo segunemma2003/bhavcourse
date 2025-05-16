@@ -239,8 +239,14 @@ TEMPLATES = [
 WSGI_APPLICATION = 'courseapp.wsgi.application'
 
 
+
+LOGS_DIR = os.path.join(BASE_DIR, 'logs')
+if not os.path.exists(LOGS_DIR):
+    os.makedirs(LOGS_DIR)
+
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
+
 
 # DATABASES = {
 #     'default': {
@@ -248,6 +254,8 @@ WSGI_APPLICATION = 'courseapp.wsgi.application'
 #         'NAME': BASE_DIR / 'db.sqlite3',
 #     }
 # }
+
+
 
 DATABASES = {
     'default': {
@@ -308,3 +316,31 @@ RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID')  # Replace with your key
 RAZORPAY_KEY_SECRET = os.environ.get('RAZORPAY_KEY_SECRET')   # Replace with your secret
 RAZORPAY_CURRENCY = 'INR'     
 RAZORPAY_WEBHOOK_SECRET= os.environ.get('RAZORPAY_WEBHOOK_SECRET')  # Replace with your webhook secret
+
+AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID")  # Replace with your actual access key
+AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY")  # Replace with your actual secret key
+AWS_REGION = os.environ.get("AWS_REGION")  # Replace with your actual AWS region
+
+# S3 URL Expiration Setting (in seconds)
+S3_URL_EXPIRATION = 36000  # 1 hour
+
+FILE_UPLOAD_MAX_MEMORY_SIZE = 5242880  # 5MB
+DATA_UPLOAD_MAX_MEMORY_SIZE = 5242880  # 5MB
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {
+        'file': {
+            'level': 'INFO',
+            'class': 'logging.FileHandler',
+            'filename': 'profile_picture_uploads.log',
+        },
+    },
+    'loggers': {
+        'core.views': {
+            'handlers': ['file'],
+            'level': 'INFO',
+            'propagate': True,
+        },
+    },
+}
