@@ -39,7 +39,7 @@ if not DEBUG:
 
 ALLOWED_HOSTS = ['*']
 APPEND_SLASH=True
-
+CORS_ALLOW_CREDENTIALS = True
 # Application definition
 
 INSTALLED_APPS = [
