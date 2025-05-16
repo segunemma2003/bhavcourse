@@ -1,4 +1,36 @@
-# Environment variables
+# Firebase credentials
+firebase-credentials.json
+*-firebase-adminsdk-*.json
+
+# Environment files
 .env
-.env.*
-!.env.example
+.env.local
+.env.production
+.env.development
+
+# Database
+*.db
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+media/
+staticfiles/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
