@@ -34,3 +34,4 @@ staticfiles/
 # OS
 .DS_Store
 Thumbs.db
+gen.py
