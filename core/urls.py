@@ -3,8 +3,9 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from core.admin_views import AdminMetricsView, ContentPageViewSet, EnrolledStudentsListView, GeneralSettingsView, PublicContentPageView, UserListView
+from core.firebase_auth_view import FirebaseGoogleAuthView
 from core.payment_views import CreateOrderView, VerifyPaymentView, cancel_subscription, razorpay_webhook, renew_subscription
-from core.views_presign import GeneratePresignedURLView
+from core.views_presign import GeneratePresignedURLView, S3DebugView
 from .views import (
     CategoryViewSet, CourseCurriculumViewSet, CourseObjectiveViewSet, CourseRequirementViewSet, CourseViewSet, 
     EnrollmentViewSet, NotificationViewSet, ProfilePictureDeleteView, ProfilePictureRetrieveView, ProfilePictureUploadView, PublicCourseDetailView, SubscriptionPlanViewSet, UserProfileView, UserSubscriptionViewSet, 
@@ -99,7 +100,9 @@ urlpatterns = [
     path('payments/cancel-subscription/<int:subscription_id>/', cancel_subscription, name='cancel-subscription'),
     path('payments/renew-subscription/<int:subscription_id>/', renew_subscription, name='renew-subscription'),
     path('payments/webhook/', razorpay_webhook, name='razorpay-webhook'),
-    path('api/presign-url/', GeneratePresignedURLView.as_view(), name='presign-url'),
+ path('debug/s3/', S3DebugView.as_view(), name='s3-debug'),
+    path('generate-presigned-url/', GeneratePresignedURLView.as_view(), name='generate-presigned-url'),
+
     path('payments/purchase-course/', CoursePurchaseView.as_view(), name='purchase-course'),
     # NEW: Course purchase endpoint
     path('courses/purchase/', CoursePurchaseView.as_view(), name='course-purchase'),
@@ -111,4 +114,5 @@ urlpatterns = [
     path('profile/picture/', ProfilePictureRetrieveView.as_view(), name='profile-picture-get'),
     path('profile/picture/delete/', ProfilePictureDeleteView.as_view(), name='profile-picture-delete'),
     path('profile/', UserProfileView.as_view(), name='user-profile'),
+     path('auth/firebase-google/', FirebaseGoogleAuthView.as_view(), name='firebase-google'),
 ]

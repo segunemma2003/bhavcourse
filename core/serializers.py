@@ -894,3 +894,6 @@ class ResetPasswordSerializer(serializers.Serializer):
         if not value.isdigit():
             raise serializers.ValidationError("OTP must contain only numbers.")
         return value
+    
+class FirebaseAuthSerializer(serializers.Serializer):
+    id_token = serializers.CharField(required=True)
