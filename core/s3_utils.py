@@ -238,9 +238,9 @@ def debug_s3_url_parsing(url):
         ]
     }
     
-url = "https://bybhavaniapp.s3.ap-south-1.amazonaws.com/Anarkali+16+Panel/Chapter+1+Anarkali+Paper+Drafting.mp4"
-debug_info = debug_s3_url_parsing(url)
-print(debug_info)
+# url = "https://bybhavaniapp.s3.ap-south-1.amazonaws.com/Anarkali+16+Panel/Chapter+1+Anarkali+Paper+Drafting.mp4"
+# debug_info = debug_s3_url_parsing(url)
+# print(debug_info)
 
 # Should generate the same command as what you manually used:
 # aws s3 presign "s3://bybhavaniapp/Anarkali 16 Panel/Chapter 1 Anarkali Paper Drafting.mp4" --region ap-south-1 --expires-in 3600
