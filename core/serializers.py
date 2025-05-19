@@ -694,7 +694,7 @@ class CourseListSerializer(serializers.ModelSerializer):
         model = Course
         fields = [
             'id', 'title', 'image', 'small_desc','description', 'category', 
-            'category_name', 'is_featured', 'date_uploaded', 
+            'category_name', 'is_featured', 'date_uploaded', 'price_one_month','price_three_months''price_lifetime'
             'location', 'enrolled_students', 'is_enrolled', 'is_wishlisted'
         ]
     
