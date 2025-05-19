@@ -149,6 +149,9 @@ class Course(models.Model):
     is_featured = models.BooleanField(default=False)
     date_uploaded = models.DateTimeField(auto_now_add=True)
     location = models.CharField(max_length=100)
+    price_one_month = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    price_three_months = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    price_lifetime = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     
     def __str__(self):
         return self.title
@@ -156,17 +159,44 @@ class Course(models.Model):
     @property
     def enrolled_students(self):
         return self.enrollments.count()
+    
+class CoursePlanType(models.TextChoices):
+    ONE_MONTH = 'ONE_MONTH', 'One Month'
+    THREE_MONTHS = 'THREE_MONTHS', 'Three Months'
+    LIFETIME = 'LIFETIME', 'Lifetime'
+    
+    
 
 class Enrollment(models.Model):
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='enrollments', on_delete=models.CASCADE)
+    user = models.ForeignKey(User, related_name='enrollments', on_delete=models.CASCADE)
     course = models.ForeignKey(Course, related_name='enrollments', on_delete=models.CASCADE)
     date_enrolled = models.DateTimeField(auto_now_add=True)
+    plan_type = models.CharField(max_length=20, choices=CoursePlanType.choices, default=CoursePlanType.ONE_MONTH)
+    expiry_date = models.DateTimeField(null=True, blank=True)  # Null for lifetime plan
+    amount_paid = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    is_active = models.BooleanField(default=True)
     
     class Meta:
         unique_together = ['user', 'course']
     
     def __str__(self):
-        return f"{self.user.email} - {self.course.title}"
+        return f"{self.user.email} - {self.course.title} - {self.get_plan_type_display()}"
+    
+    @property
+    def is_expired(self):
+        if self.plan_type == CoursePlanType.LIFETIME:
+            return False
+        return timezone.now() >= self.expiry_date if self.expiry_date else False
+    
+    def save(self, *args, **kwargs):
+        # Calculate expiry date if not a lifetime plan
+        if not self.expiry_date and self.plan_type != CoursePlanType.LIFETIME:
+            if self.plan_type == CoursePlanType.ONE_MONTH:
+                self.expiry_date = self.date_enrolled + timezone.timedelta(days=30)
+            elif self.plan_type == CoursePlanType.THREE_MONTHS:
+                self.expiry_date = self.date_enrolled + timezone.timedelta(days=90)
+        
+        super().save(*args, **kwargs)
     
 class PlanFeature(models.Model):
     description = models.CharField(max_length=255)
@@ -235,8 +265,11 @@ class PaymentCard(models.Model):
 class Purchase(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='purchases', on_delete=models.SET_NULL, null=True, blank=True)
     course = models.ForeignKey(Course, related_name='purchases', on_delete=models.SET_NULL, null=True, blank=True)
-    payment_card = models.ForeignKey(PaymentCard, related_name='purchases', on_delete=models.SET_NULL, null=True, blank=True)  # Made nullable
-    plan = models.ForeignKey(SubscriptionPlan, related_name='purchases', on_delete=models.SET_NULL, null=True, blank=True)  # Added plan reference
+    payment_card = models.ForeignKey(PaymentCard, related_name='purchases', on_delete=models.SET_NULL, null=True, blank=True)
+    
+    # Add plan_type field instead of the plan field
+    plan_type = models.CharField(max_length=20, choices=CoursePlanType.choices, null=True, blank=True)
+    
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     purchase_date = models.DateTimeField(auto_now_add=True)
     transaction_id = models.CharField(max_length=100, unique=True)
@@ -252,7 +285,8 @@ class Purchase(models.Model):
     )
     
     def __str__(self):
-        return f"{self.user.email} - {self.course.title}"
+        course_title = self.course.title if self.course else "Unknown Course"
+        return f"{self.user.email if self.user else 'Unknown User'} - {course_title}"
 
 class Notification(models.Model):
     NOTIFICATION_TYPES = (

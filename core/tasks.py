@@ -2,7 +2,7 @@ from celery import shared_task
 from django.utils import timezone
 from django.core.mail import send_mail
 from django.conf import settings
-from .models import UserSubscription, Notification, FCMDevice
+from .models import CoursePlanType, Enrollment, UserSubscription, Notification, FCMDevice
 from django.contrib.auth import get_user_model
 from .firebase import send_firebase_message, send_bulk_notifications
 import logging
@@ -353,3 +353,158 @@ def cleanup_inactive_fcm_tokens():
             deactivated_count += 1
     
     return f"Cleaned up {deactivated_count} inactive FCM tokens"
+
+
+
+@shared_task
+def send_enrollment_expiry_reminder(enrollment_id=None):
+    """
+    Send email notifications to users whose enrollments are expiring in 3 days.
+    If enrollment_id is provided, send reminder for that specific enrollment.
+    Otherwise, send reminders for all enrollments expiring in 3 days.
+    """
+    if enrollment_id:
+        # Send reminder for specific enrollment
+        try:
+            enrollment = Enrollment.objects.get(id=enrollment_id, is_active=True)
+            
+            # Skip lifetime enrollments
+            if enrollment.plan_type == CoursePlanType.LIFETIME:
+                return f"Enrollment {enrollment_id} is a lifetime plan, no expiry reminder needed"
+            
+            user = enrollment.user
+            course = enrollment.course
+            expiry_date = enrollment.expiry_date.strftime("%Y-%m-%d")
+            
+            # Check if it's within 3 days of expiry
+            if enrollment.expiry_date <= timezone.now() + timezone.timedelta(days=3):
+                # Send email notification
+                subject = 'Your course enrollment is about to expire'
+                message = f'''
+                Dear {user.full_name},
+                
+                Your enrollment in {course.title} will expire on {expiry_date}.
+                
+                Renew your enrollment to continue enjoying access to the course content.
+                
+                Thank you for being a valued customer.
+                
+                Best regards,
+                The Course App Team
+                '''
+                send_mail(subject, message, settings.EMAIL_HOST_USER, [user.email])
+                
+                # Create a notification record in the database
+                Notification.objects.create(
+                    user=user,
+                    title="Enrollment Expiring Soon",
+                    message=f"Your enrollment in {course.title} will expire on {expiry_date}. Renew now to maintain access.",
+                    notification_type='COURSE'
+                )
+                
+                # Send push notification
+                push_result = send_push_notification.delay(
+                    user.id, 
+                    "Enrollment Expiring Soon", 
+                    f"Your course access expires on {expiry_date}",
+                    {'type': 'enrollment_expiry', 'enrollment_id': enrollment_id}
+                )
+                
+                logger.info(f"Sent expiry reminder for enrollment {enrollment_id}")
+                return f"Sent expiry reminder for enrollment {enrollment_id}"
+                
+        except Enrollment.DoesNotExist:
+            logger.error(f"Enrollment {enrollment_id} not found")
+            return f"Enrollment {enrollment_id} not found"
+        except Exception as e:
+            logger.error(f"Error sending reminder for enrollment {enrollment_id}: {e}")
+            return f"Error: {str(e)}"
+    else:
+        # Find enrollments expiring in the next 3 days
+        expiry_threshold = timezone.now() + timezone.timedelta(days=3)
+        expiring_enrollments = Enrollment.objects.filter(
+            is_active=True,
+            plan_type__in=[CoursePlanType.ONE_MONTH, CoursePlanType.THREE_MONTHS],
+            expiry_date__lt=expiry_threshold,
+            expiry_date__gt=timezone.now()
+        )
+        
+        count = 0
+        for enrollment in expiring_enrollments:
+            user = enrollment.user
+            course = enrollment.course
+            expiry_date = enrollment.expiry_date.strftime("%Y-%m-%d")
+            
+            # Send email notification
+            subject = 'Your course enrollment is about to expire'
+            message = f'''
+            Dear {user.full_name},
+            
+            Your enrollment in {course.title} will expire on {expiry_date}.
+            
+            Renew your enrollment to continue enjoying access to the course content.
+            
+            Thank you for being a valued customer.
+            
+            Best regards,
+            The Course App Team
+            '''
+            send_mail(subject, message, settings.EMAIL_HOST_USER, [user.email])
+            
+            # Create a notification record in the database
+            Notification.objects.create(
+                user=user,
+                title="Enrollment Expiring Soon",
+                message=f"Your enrollment in {course.title} will expire on {expiry_date}. Renew now to maintain access.",
+                notification_type='COURSE'
+            )
+            
+            # Send push notification to user's devices
+            send_push_notification.delay(
+                user.id, 
+                "Enrollment Expiring Soon", 
+                f"Your course access expires on {expiry_date}",
+                {'type': 'enrollment_expiry', 'enrollment_id': enrollment.id}
+            )
+            count += 1
+        
+        return f"Sent {count} enrollment expiry reminders"
+
+
+@shared_task
+def deactivate_expired_enrollments():
+    """
+    Automatically deactivate expired enrollments
+    """
+    now = timezone.now()
+    expired_enrollments = Enrollment.objects.filter(
+        is_active=True,
+        plan_type__in=[CoursePlanType.ONE_MONTH, CoursePlanType.THREE_MONTHS],
+        expiry_date__lt=now
+    )
+    
+    # Send notifications before deactivating
+    for enrollment in expired_enrollments:
+        user = enrollment.user
+        course = enrollment.course
+        
+        # Create notification
+        Notification.objects.create(
+            user=user,
+            title="Course Enrollment Expired",
+            message=f"Your enrollment in {course.title} has expired. Please renew to regain access to the course.",
+            notification_type='COURSE'
+        )
+        
+        # Send push notification
+        send_push_notification.delay(
+            user.id,
+            "Course Enrollment Expired",
+            f"Your enrollment in {course.title} has expired",
+            {'type': 'enrollment_expired', 'enrollment_id': enrollment.id}
+        )
+    
+    # Deactivate expired enrollments
+    expired_count = expired_enrollments.update(is_active=False)
+    
+    return f"Deactivated {expired_count} expired enrollments"

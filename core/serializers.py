@@ -6,7 +6,7 @@ from allauth.account.utils import setup_user_email
 from dj_rest_auth.registration.serializers import RegisterSerializer
 
 from core.s3_utils import generate_presigned_url, is_s3_url
-from .models import (Category, ContentPage, Course, CourseObjective, CourseRequirement, CourseCurriculum, Enrollment, FCMDevice, GeneralSettings, Notification, PaymentOrder, 
+from .models import (Category, ContentPage, Course, CourseObjective, CoursePlanType, CourseRequirement, CourseCurriculum, Enrollment, FCMDevice, GeneralSettings, Notification, PaymentOrder, 
                      SubscriptionPlan, PlanFeature, UserSubscription, 
                     Wishlist, PaymentCard, Purchase
                     )
@@ -267,14 +267,17 @@ class CourseDetailSerializer(serializers.ModelSerializer):
     curriculum = CourseCurriculumSerializer(many=True, read_only=True)
     is_enrolled = serializers.SerializerMethodField()
     is_wishlisted = serializers.SerializerMethodField()
+    user_enrollment = serializers.SerializerMethodField()
     
     class Meta:
         model = Course
         fields = [
-            'id', 'title', 'image', 'small_desc','description', 'category', 
+            'id', 'title', 'image', 'small_desc', 'description', 'category', 
             'category_name', 'is_featured', 'date_uploaded', 
             'location', 'enrolled_students', 'objectives',
-            'requirements', 'curriculum', 'is_enrolled', 'is_wishlisted'
+            'requirements', 'curriculum', 'is_enrolled', 'is_wishlisted',
+            'price_one_month', 'price_three_months', 'price_lifetime',
+            'user_enrollment'
         ]
     
     def get_enrolled_students(self, obj):
@@ -283,7 +286,7 @@ class CourseDetailSerializer(serializers.ModelSerializer):
     def get_is_enrolled(self, obj):
         request = self.context.get('request')
         if request and request.user.is_authenticated:
-            return obj.enrollments.filter(user=request.user).exists()
+            return obj.enrollments.filter(user=request.user, is_active=True).exists()
         return False
     
     def get_is_wishlisted(self, obj):
@@ -291,6 +294,21 @@ class CourseDetailSerializer(serializers.ModelSerializer):
         if request and request.user.is_authenticated:
             return obj.wishlisted_by.filter(user=request.user).exists()
         return False
+    
+    def get_user_enrollment(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            enrollment = obj.enrollments.filter(user=request.user).first()
+            if enrollment:
+                return {
+                    'id': enrollment.id,
+                    'plan_type': enrollment.plan_type,
+                    'plan_name': enrollment.get_plan_type_display(),
+                    'expiry_date': enrollment.expiry_date,
+                    'is_active': enrollment.is_active,
+                    'is_expired': enrollment.is_expired
+                }
+        return None
 
 class CourseCreateUpdateSerializer(serializers.ModelSerializer):
     objectives = CourseObjectiveSerializer(many=True, required=False)  # Change this to required=False
@@ -300,9 +318,11 @@ class CourseCreateUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Course
         fields = [
-            'title', 'image', 'small_desc','description', 'category', 
+            'title', 'image', 'small_desc', 'description', 'category', 
             'is_featured', 'location', 'objectives',
-            'requirements', 'curriculum'
+            'requirements', 'curriculum',
+            # Add the three price fields
+            'price_one_month', 'price_three_months', 'price_lifetime'
         ]
         # Define extra kwargs to handle required fields differently for creation vs update
         extra_kwargs = {
@@ -311,6 +331,9 @@ class CourseCreateUpdateSerializer(serializers.ModelSerializer):
             'description': {'required': False},
             'category': {'required': False},
             'image': {'required': False},
+            'price_one_month': {'required': False},
+            'price_three_months': {'required': False},
+            'price_lifetime': {'required': False},
         }
     
     def to_internal_value(self, data):
@@ -403,7 +426,8 @@ class CourseCreateUpdateSerializer(serializers.ModelSerializer):
         
         # For creation, validate that required fields are present
         if not is_update:
-            required_fields = ['title', 'small_desc', 'category', 'description']
+            required_fields = ['title', 'small_desc', 'category', 'description', 
+                            'price_one_month', 'price_three_months', 'price_lifetime']
             missing_fields = [field for field in required_fields if field not in data]
             
             if missing_fields:
@@ -519,10 +543,14 @@ class CourseCreateUpdateSerializer(serializers.ModelSerializer):
 
 class EnrollmentSerializer(serializers.ModelSerializer):
     course = CourseDetailSerializer(read_only=True)
+    plan_name = serializers.CharField(source='get_plan_type_display', read_only=True)
+    is_expired = serializers.BooleanField(read_only=True)
+    
     class Meta:
         model = Enrollment
-        fields = ['id', 'course', 'date_enrolled']
-        read_only_fields = ['date_enrolled']
+        fields = ['id', 'course', 'date_enrolled', 'plan_type', 'plan_name', 
+                 'expiry_date', 'amount_paid', 'is_active', 'is_expired']
+        read_only_fields = ['date_enrolled', 'expiry_date', 'is_expired']
         
 
 class PlanFeatureSerializer(serializers.ModelSerializer):
@@ -633,19 +661,21 @@ class PaymentCardSerializer(serializers.ModelSerializer):
 class PurchaseSerializer(serializers.ModelSerializer):
     course_title = serializers.CharField(source='course.title', read_only=True)
     course_image = serializers.ImageField(source='course.image', read_only=True)
-    plan_name = serializers.CharField(source='plan.name', read_only=True)
+    plan_name = serializers.CharField(source='get_plan_type_display', read_only=True)
     card_last_four = serializers.CharField(source='payment_card.last_four', read_only=True)
     
     class Meta:
         model = Purchase
         fields = [
             'id', 'course', 'course_title', 'course_image',
-            'plan', 'plan_name', 'payment_card', 'card_last_four', 
+            'plan_type', 'plan_name', 
+            'payment_card', 'card_last_four', 
             'amount', 'purchase_date', 'transaction_id', 'payment_status',
             'razorpay_order_id', 'razorpay_payment_id'
         ]
         read_only_fields = ['purchase_date', 'transaction_id', 'payment_status',
                           'razorpay_order_id', 'razorpay_payment_id']
+        
 # Update UserSerializer to include date_of_birth
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
@@ -734,8 +764,12 @@ class PaymentOrderSerializer(serializers.ModelSerializer):
         
 class CreateOrderSerializer(serializers.Serializer):
     course_id = serializers.IntegerField()
-    plan_id = serializers.IntegerField()
+    plan_type = serializers.ChoiceField(choices=CoursePlanType.choices)
     payment_card_id = serializers.IntegerField(required=False, allow_null=True)
+    
+    class Meta:
+        # Adding a ref_name to avoid conflicts
+        ref_name = "CreateOrderSerializer"
     
     def validate_course_id(self, value):
         try:
@@ -744,12 +778,6 @@ class CreateOrderSerializer(serializers.Serializer):
         except Course.DoesNotExist:
             raise serializers.ValidationError("Course does not exist")
     
-    def validate_plan_id(self, value):
-        try:
-            SubscriptionPlan.objects.get(pk=value)
-            return value
-        except SubscriptionPlan.DoesNotExist:
-            raise serializers.ValidationError("Subscription plan does not exist")
     
     def validate_payment_card_id(self, value):
         if value is None:

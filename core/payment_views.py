@@ -1,5 +1,5 @@
 # core/payment_views.py
-from rest_framework import status, views, permissions
+from rest_framework import status, views, permissions, serializers
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from django.db import transaction
@@ -7,7 +7,7 @@ from django.shortcuts import get_object_or_404
 from django.conf import settings
 from django.utils import timezone
 
-from .models import Course, PaymentCard, PaymentOrder, SubscriptionPlan, Purchase, Enrollment, UserSubscription, Notification
+from .models import Course, CoursePlanType, PaymentCard, PaymentOrder, SubscriptionPlan, Purchase, Enrollment, UserSubscription, Notification
 from .serializers import CreateOrderSerializer, PaymentOrderSerializer, VerifyPaymentSerializer, PurchaseSerializer
 from .services import RazorpayService
 from django.views.decorators.csrf import csrf_exempt
@@ -28,37 +28,37 @@ razorpay_service = RazorpayService()
 
 class CreateOrderView(views.APIView):
     """
-    API endpoint for creating a Razorpay order for course subscription
+    API endpoint for creating a Razorpay order for course purchase
     """
     permission_classes = [permissions.IsAuthenticated]
     
+    class CreateOrderSerializer(serializers.Serializer):
+        course_id = serializers.IntegerField()
+        plan_type = serializers.ChoiceField(choices=CoursePlanType.choices)
+        payment_card_id = serializers.IntegerField(required=False, allow_null=True)
+        
+        def validate_course_id(self, value):
+            try:
+                Course.objects.get(pk=value)
+                return value
+            except Course.DoesNotExist:
+                raise serializers.ValidationError("Course does not exist")
+        
+        def validate_payment_card_id(self, value):
+            if value is None:
+                return None
+            try:
+                PaymentCard.objects.get(pk=value)
+                return value
+            except PaymentCard.DoesNotExist:
+                raise serializers.ValidationError("Payment card does not exist")
+    
     @swagger_auto_schema(
         operation_summary="Create payment order",
-        operation_description="Creates a Razorpay payment order for course subscription.",
+        operation_description="Creates a Razorpay payment order for course purchase.",
         request_body=CreateOrderSerializer,
         responses={
-            status.HTTP_201_CREATED: openapi.Response(
-                description="Order created successfully",
-                schema=openapi.Schema(
-                    type=openapi.TYPE_OBJECT,
-                    properties={
-                        'order_id': openapi.Schema(type=openapi.TYPE_STRING),
-                        'amount': openapi.Schema(type=openapi.TYPE_NUMBER),
-                        'currency': openapi.Schema(type=openapi.TYPE_STRING),
-                        'payment_order_id': openapi.Schema(type=openapi.TYPE_INTEGER),
-                        'key_id': openapi.Schema(type=openapi.TYPE_STRING),
-                        'user_info': openapi.Schema(
-                            type=openapi.TYPE_OBJECT,
-                            properties={
-                                'name': openapi.Schema(type=openapi.TYPE_STRING),
-                                'email': openapi.Schema(type=openapi.TYPE_STRING),
-                                'contact': openapi.Schema(type=openapi.TYPE_STRING)
-                            }
-                        ),
-                        'notes': openapi.Schema(type=openapi.TYPE_OBJECT)
-                    }
-                )
-            ),
+            status.HTTP_201_CREATED: "Order created successfully",
             status.HTTP_400_BAD_REQUEST: "Invalid request data or already enrolled",
             status.HTTP_500_INTERNAL_SERVER_ERROR: "Failed to create payment order"
         }
@@ -72,22 +72,36 @@ class CreateOrderView(views.APIView):
         
         # Get validated data
         course_id = serializer.validated_data.get('course_id')
-        plan_id = serializer.validated_data.get('plan_id')
+        plan_type = serializer.validated_data.get('plan_type')
         payment_card_id = serializer.validated_data.get('payment_card_id')
         
-        # Get course and plan objects
+        # Get course object
         course = get_object_or_404(Course, pk=course_id)
-        plan = get_object_or_404(SubscriptionPlan, pk=plan_id)
         
-        # Check if user already has an active subscription for this course
+        # Get amount based on plan type
+        if plan_type == CoursePlanType.ONE_MONTH:
+            amount = course.price_one_month
+        elif plan_type == CoursePlanType.THREE_MONTHS:
+            amount = course.price_three_months
+        elif plan_type == CoursePlanType.LIFETIME:
+            amount = course.price_lifetime
+        else:
+            return Response(
+                {"error": "Invalid plan type"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if user already has an active enrollment for this course
         existing_enrollment = Enrollment.objects.filter(
             user=request.user,
-            course=course
-        ).exists()
+            course=course,
+            is_active=True
+        ).first()
         
-        if existing_enrollment:
+        # If they have a lifetime plan already, they can't purchase again
+        if existing_enrollment and existing_enrollment.plan_type == CoursePlanType.LIFETIME:
             return Response(
-                {"error": "You are already enrolled in this course"},
+                {"error": "You already have lifetime access to this course"},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -98,16 +112,17 @@ class CreateOrderView(views.APIView):
         notes = {
             'user_id': str(request.user.id),
             'course_id': str(course_id),
-            'plan_id': str(plan_id),
+            'plan_type': plan_type,
             'email': request.user.email,
             'course_title': course.title,
-            'plan_name': plan.name
+            'plan_name': dict(CoursePlanType.choices)[plan_type]
         }
         
         # Create Razorpay order
         try:
+            razorpay_service = RazorpayService()
             order_response = razorpay_service.create_order(
-                amount=float(plan.amount),
+                amount=float(amount),
                 receipt=receipt_id,
                 notes=notes
             )
@@ -116,8 +131,7 @@ class CreateOrderView(views.APIView):
             payment_order = PaymentOrder.objects.create(
                 user=request.user,
                 course=course,
-                plan=plan,
-                amount=plan.amount,
+                amount=amount,
                 razorpay_order_id=order_response['id'],
                 status='CREATED'
             )
@@ -129,6 +143,8 @@ class CreateOrderView(views.APIView):
                 'currency': order_response['currency'],
                 'payment_order_id': payment_order.id,
                 'key_id': settings.RAZORPAY_KEY_ID,
+                'plan_type': plan_type,
+                'plan_name': dict(CoursePlanType.choices)[plan_type],
                 'user_info': {
                     'name': request.user.full_name,
                     'email': request.user.email,
@@ -438,6 +454,7 @@ def renew_subscription(request, subscription_id):
         500: "Server error"
     }
 )
+
 @api_view(['POST'])
 @csrf_exempt
 def razorpay_webhook(request):

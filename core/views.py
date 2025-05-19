@@ -19,7 +19,7 @@ from django.db import models
 import io
 import uuid
 from .models import (
-    Course, Enrollment, Category, FCMDevice, Notification,
+    Course, CoursePlanType, Enrollment, Category, FCMDevice, Notification,
     SubscriptionPlan, UserSubscription, Wishlist, 
     PaymentCard, Purchase, User
 )
@@ -2019,8 +2019,34 @@ class CoursePurchaseView(generics.CreateAPIView):
     """
     API endpoint for purchasing courses with Razorpay payment verification.
     """
-    serializer_class = PurchaseCourseSerializer
     permission_classes = [permissions.IsAuthenticated]
+    
+    class InputSerializer(serializers.Serializer):
+        course_id = serializers.IntegerField()
+        plan_type = serializers.ChoiceField(choices=CoursePlanType.choices)
+        razorpay_payment_id = serializers.CharField()
+        razorpay_order_id = serializers.CharField()
+        razorpay_signature = serializers.CharField()
+        payment_card_id = serializers.IntegerField(required=False, allow_null=True)
+        
+        def validate_course_id(self, value):
+            try:
+                Course.objects.get(pk=value)
+                return value
+            except Course.DoesNotExist:
+                raise serializers.ValidationError("Course does not exist")
+        
+        def validate_payment_card_id(self, value):
+            if value is None:
+                return None
+            try:
+                PaymentCard.objects.get(pk=value)
+                return value
+            except PaymentCard.DoesNotExist:
+                raise serializers.ValidationError("Payment card does not exist")
+    
+    def get_serializer_class(self):
+        return self.InputSerializer
     
     @swagger_auto_schema(
         operation_summary="Purchase a course",
@@ -2030,62 +2056,38 @@ class CoursePurchaseView(generics.CreateAPIView):
         This endpoint:
         1. Verifies the Razorpay payment signature
         2. Creates a Purchase record with COMPLETED status
-        3. Creates/updates UserSubscription (deactivates old, creates new)
-        4. Creates enrollment for the course
-        5. Updates PaymentOrder status or creates new one
-        6. Creates notifications for purchase and enrollment
-        7. Schedules subscription expiry reminder (3 days before)
+        3. Creates/updates Enrollment for the course with selected plan
+        4. Updates PaymentOrder status or creates new one
+        5. Creates notifications for purchase and enrollment
+        6. Schedules enrollment expiry reminder (3 days before) for non-lifetime plans
         
         Payment flow:
         1. Create order using /payments/create-order/
         2. Process payment on frontend with Razorpay
         3. Call this endpoint with payment details to complete purchase
         """,
-        request_body=PurchaseCourseSerializer,
+        request_body=InputSerializer,
         responses={
             status.HTTP_201_CREATED: openapi.Response(
                 description="Course purchased successfully",
                 schema=openapi.Schema(
                     type=openapi.TYPE_OBJECT,
                     properties={
-                        'message': openapi.Schema(type=openapi.TYPE_STRING),
-                        'purchase': openapi.Schema(
+                        'success': openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                        'data': openapi.Schema(
                             type=openapi.TYPE_OBJECT,
                             properties={
-                                'id': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                'transaction_id': openapi.Schema(type=openapi.TYPE_STRING),
-                                'amount': openapi.Schema(type=openapi.TYPE_NUMBER),
-                                'payment_status': openapi.Schema(type=openapi.TYPE_STRING)
+                                'message': openapi.Schema(type=openapi.TYPE_STRING),
+                                'purchase': openapi.Schema(type=openapi.TYPE_OBJECT),
+                                'enrollment': openapi.Schema(type=openapi.TYPE_OBJECT),
+                                'payment_order_id': openapi.Schema(type=openapi.TYPE_INTEGER)
                             }
-                        ),
-                        'subscription': openapi.Schema(
-                            type=openapi.TYPE_OBJECT,
-                            properties={
-                                'id': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                'plan_name': openapi.Schema(type=openapi.TYPE_STRING),
-                                'start_date': openapi.Schema(type=openapi.TYPE_STRING, format='date-time'),
-                                'end_date': openapi.Schema(type=openapi.TYPE_STRING, format='date-time'),
-                                'is_active': openapi.Schema(type=openapi.TYPE_BOOLEAN)
-                            }
-                        ),
-                        'enrollment_id': openapi.Schema(type=openapi.TYPE_INTEGER),
-                        'payment_order_id': openapi.Schema(type=openapi.TYPE_INTEGER)
+                        )
                     }
                 )
             ),
-            status.HTTP_400_BAD_REQUEST: openapi.Response(
-                description="Invalid request data or payment verification failed",
-                schema=openapi.Schema(
-                    type=openapi.TYPE_OBJECT,
-                    properties={
-                        'error': openapi.Schema(type=openapi.TYPE_STRING),
-                        'details': openapi.Schema(type=openapi.TYPE_OBJECT)
-                    }
-                )
-            ),
-            status.HTTP_404_NOT_FOUND: "Course or plan not found"
-        },
-        tags=['Payments']
+            status.HTTP_400_BAD_REQUEST: "Invalid request data or payment verification failed"
+        }
     )
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -2093,33 +2095,40 @@ class CoursePurchaseView(generics.CreateAPIView):
         
         # Extract validated data
         course_id = serializer.validated_data['course_id']
-        plan_id = serializer.validated_data['plan_id']
-        payment_card_id = serializer.validated_data.get('payment_card_id')
+        plan_type = serializer.validated_data['plan_type']
+        payment_card_id = serializer.validated_data.get('payment_card_id')  # Use .get() to handle None
         razorpay_payment_id = serializer.validated_data['razorpay_payment_id']
         razorpay_order_id = serializer.validated_data['razorpay_order_id']
         razorpay_signature = serializer.validated_data['razorpay_signature']
         
         try:
             # Get objects
+            # Get objects
             course = Course.objects.get(pk=course_id)
-            plan = SubscriptionPlan.objects.get(pk=plan_id)
-            payment_card = PaymentCard.objects.get(pk=payment_card_id) if payment_card_id else None
             
-            # Verify payment card belongs to user if provided
-            if payment_card and payment_card.user != request.user:
-                return Response(
-                    {'error': 'Payment card does not belong to you'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+            # Only try to get payment card if an ID was provided
+            payment_card = None
+            if payment_card_id:
+                try:
+                    payment_card = PaymentCard.objects.get(pk=payment_card_id)
+                    # Verify payment card belongs to user if provided
+                    if payment_card.user != request.user:
+                        return Response(
+                            {'error': 'Payment card does not belong to you'},
+                            status=status.HTTP_400_BAD_REQUEST
+                        )
+                except PaymentCard.DoesNotExist:
+                    return Response(
+                        {'error': 'Payment card not found'},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
             
-            # Process purchase using RazorpayService
-            razorpay_service = RazorpayService()
             
             with transaction.atomic():
                 result = process_course_purchase(
                     user=request.user,
                     course=course,
-                    plan=plan,
+                    plan_type=plan_type,
                     razorpay_payment_id=razorpay_payment_id,
                     razorpay_order_id=razorpay_order_id,
                     razorpay_signature=razorpay_signature,
@@ -2135,28 +2144,22 @@ class CoursePurchaseView(generics.CreateAPIView):
                     'amount': result['purchase'].amount,
                     'payment_status': result['purchase'].payment_status
                 },
-                'subscription': {
-                    'id': result['subscription'].id,
-                    'plan_name': result['subscription'].plan.name,
-                    'start_date': result['subscription'].start_date,
-                    'end_date': result['subscription'].end_date,
-                    'is_active': result['subscription'].is_active
+                'enrollment': {
+                    'id': result['enrollment'].id,
+                    'plan_type': result['enrollment'].plan_type,
+                    'plan_name': result['enrollment'].get_plan_type_display(),
+                    'expiry_date': result['enrollment'].expiry_date,
+                    'is_active': result['enrollment'].is_active
                 },
-                'enrollment_id': result['enrollment'].id,
                 'payment_order_id': result['payment_order'].id
             }
             
             
-            return Response({"success":True, "data":response_data}, status=status.HTTP_201_CREATED)
+            return Response({"success": True, "data": response_data}, status=status.HTTP_201_CREATED)
             
         except Course.DoesNotExist:
             return Response(
                 {'error': 'Course not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-        except SubscriptionPlan.DoesNotExist:
-            return Response(
-                {'error': 'Subscription plan not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
         except PaymentCard.DoesNotExist:
@@ -2171,12 +2174,11 @@ class CoursePurchaseView(generics.CreateAPIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         except Exception as e:
-            # logger.error(f"Course purchase failed: {str(e)}")
+            logger.error(f"Course purchase failed: {str(e)}")
             return Response(
                 {'error': 'Purchase failed', 'details': str(e)},
                 status=status.HTTP_400_BAD_REQUEST
             )
-
 class ProfilePictureUploadView(generics.UpdateAPIView):
     """
     API endpoint for uploading user profile picture.
