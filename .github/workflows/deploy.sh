@@ -142,6 +142,7 @@ sudo systemctl restart redis-server
 
 if command -v supervisorctl &> /dev/null; then
     echo "Restarting services with supervisor..."
+    sudo chmod +x /var/www/bhavani/venv/bin/gunicorn
     sudo supervisorctl restart courseapp:* || echo "Supervisor not configured yet"
 fi
 
