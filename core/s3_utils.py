@@ -100,6 +100,7 @@ def generate_presigned_url(url, expiration=86400):
         str: Pre-signed URL or original URL if not an S3 URL or if error occurs
     """
     expiration=86400
+    logger.info(f"Starting presigned URL generation with expiration: {expiration}")
     if not is_s3_url(url):
         logger.warning(f"URL is not an S3 URL: {url}")
         return url
@@ -150,6 +151,11 @@ def generate_presigned_url(url, expiration=86400):
             ExpiresIn=expiration
         )
         print(presigned_url)
+        import re
+        expires_match = re.search(r'X-Amz-Expires=(\d+)', presigned_url)
+        if expires_match:
+            actual_expiration = expires_match.group(1)
+            logger.warning(f"Requested expiration: {expiration} but got: {actual_expiration}")
         logger.info(f"Generated presigned URL for s3://{bucket_name}/{object_key}")
         return presigned_url
         
