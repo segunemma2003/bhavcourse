@@ -148,6 +148,10 @@ def generate_presigned_url(url, expiration=3600):
             },
             ExpiresIn=expiration
         )
+        
+        # Replace %20 with spaces in the final URL
+        presigned_url = presigned_url.replace('%20', ' ')
+        
         print(presigned_url)
         logger.info(f"Generated presigned URL for s3://{bucket_name}/{object_key}")
         return presigned_url
