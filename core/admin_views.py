@@ -124,10 +124,10 @@ class AdminMetricsView(generics.GenericAPIView):
             'course_popularity': course_popularity_data
         }
         
-        serializer = self.get_serializer(data=response_data)
-        serializer.is_valid()  # Always valid as we're setting read-only fields
+        # serializer = self.get_serializer(data=response_data)
+        # serializer.is_valid()  # Always valid as we're setting read-only fields
         
-        return Response(serializer.data)
+        return Response(response_data, status=status.HTTP_200_OK)
 
 class ContentPageViewSet(viewsets.ModelViewSet):
     """

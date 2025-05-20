@@ -135,10 +135,11 @@ class RazorpayService:
             if existing_enrollment:
                 # Update existing enrollment with new plan type
                 existing_enrollment.plan_type = plan_type
+                current_time = timezone.now()
                 if plan_type == CoursePlanType.ONE_MONTH:
-                    existing_enrollment.expiry_date = timezone.now() + timezone.timedelta(days=30)
+                    existing_enrollment.expiry_date = current_time + timezone.timedelta(days=30)
                 elif plan_type == CoursePlanType.THREE_MONTHS:
-                    existing_enrollment.expiry_date = timezone.now() + timezone.timedelta(days=90)
+                    existing_enrollment.expiry_date = current_time + timezone.timedelta(days=90)
                 elif plan_type == CoursePlanType.LIFETIME:
                     existing_enrollment.expiry_date = None
                 
@@ -313,6 +314,7 @@ def process_course_purchase(user, course, plan_type, razorpay_payment_id, razorp
             user=user,
             course=course,
             payment_card=payment_card,
+            plan_type=plan_type,
             amount=amount,
             transaction_id=transaction_id,
             razorpay_payment_id=razorpay_payment_id,
@@ -325,11 +327,13 @@ def process_course_purchase(user, course, plan_type, razorpay_payment_id, razorp
         
         if existing_enrollment:
             # Update existing enrollment with new plan type
+            current_time = timezone.now()
+            
             existing_enrollment.plan_type = plan_type
             if plan_type == CoursePlanType.ONE_MONTH:
-                existing_enrollment.expiry_date = timezone.now() + timezone.timedelta(days=30)
+                existing_enrollment.expiry_date = current_time + timezone.timedelta(days=30)
             elif plan_type == CoursePlanType.THREE_MONTHS:
-                existing_enrollment.expiry_date = timezone.now() + timezone.timedelta(days=90)
+                existing_enrollment.expiry_date = current_time + timezone.timedelta(days=90)
             elif plan_type == CoursePlanType.LIFETIME:
                 existing_enrollment.expiry_date = None
             
@@ -339,12 +343,21 @@ def process_course_purchase(user, course, plan_type, razorpay_payment_id, razorp
             enrollment = existing_enrollment
         else:
             # Create new enrollment
+            current_time = timezone.now()
+            expiry_date = None
+            
+            if plan_type == CoursePlanType.ONE_MONTH:
+                expiry_date = current_time + timezone.timedelta(days=30)
+            elif plan_type == CoursePlanType.THREE_MONTHS:
+                expiry_date = current_time + timezone.timedelta(days=90)
+                
             enrollment = Enrollment.objects.create(
                 user=user,
                 course=course,
                 plan_type=plan_type,
                 amount_paid=amount,
-                is_active=True
+                is_active=True,
+                expiry_date=expiry_date
             )
         
         # Update payment order status if exists
@@ -405,7 +418,7 @@ def process_course_purchase(user, course, plan_type, razorpay_payment_id, razorp
         )
         
         # Schedule expiry reminder for non-lifetime plans
-        if plan_type != CoursePlanType.LIFETIME and enrollment.expiry_date:
+        if plan_type != CoursePlanType.LIFETIME and enrollment.expiry_date is not None:
             from .tasks import send_enrollment_expiry_reminder
             # Schedule the task to run 3 days before expiry
             reminder_date = enrollment.expiry_date - timezone.timedelta(days=3)
