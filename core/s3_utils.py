@@ -99,6 +99,7 @@ def generate_presigned_url(url, expiration=86400):
     Returns:
         str: Pre-signed URL or original URL if not an S3 URL or if error occurs
     """
+    expiration=86400
     if not is_s3_url(url):
         logger.warning(f"URL is not an S3 URL: {url}")
         return url
