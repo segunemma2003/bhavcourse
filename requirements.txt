@@ -83,4 +83,3 @@ uvicorn==0.34.2
 vine==5.1.0
 wcwidth==0.2.13
 xlrd==1.0.0
-awscli
