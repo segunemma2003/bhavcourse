@@ -71,7 +71,7 @@ class S3DebugView(APIView):
             'AWS_ACCESS_KEY_ID': bool(getattr(settings, 'AWS_ACCESS_KEY_ID', None)),
             'AWS_SECRET_ACCESS_KEY': bool(getattr(settings, 'AWS_SECRET_ACCESS_KEY', None)),
             'AWS_REGION': getattr(settings, 'AWS_REGION', None),
-            'S3_URL_EXPIRATION': getattr(settings, 'S3_URL_EXPIRATION', 3600)
+            'S3_URL_EXPIRATION': getattr(settings, 'S3_URL_EXPIRATION', 86400)
         }
         
         # Test connectivity
@@ -121,7 +121,7 @@ class S3DebugView(APIView):
                         result['error'] = f"Error checking object: {e}"
                 
                 # Generate presigned URL
-                presigned_url = generate_presigned_url(url, 3600)
+                presigned_url = generate_presigned_url(url, 86400)
                 result['presigned_url'] = presigned_url
                 result['presigned_url_generated'] = presigned_url != url
                 
@@ -206,14 +206,14 @@ class GeneratePresignedURLView(APIView):
         Request body:
         {
             "url": "https://bucket-name.s3.amazonaws.com/path/to/video.mp4",
-            "expiration": 3600  # Optional, defaults to settings.S3_URL_EXPIRATION
+            "expiration": 86400  # Optional, defaults to settings.S3_URL_EXPIRATION
         }
         
         Response:
         {
             "success": true,
             "presigned_url": "https://...",
-            "expires_in_seconds": 3600,
+            "expires_in_seconds": 86400,
             "bucket_name": "bucket-name",
             "object_key": "path/to/video.mp4"
         }
@@ -245,13 +245,13 @@ class GeneratePresignedURLView(APIView):
             )
         
         # Get expiration from request or use default
-        expiration = request.data.get('expiration', getattr(settings, 'S3_URL_EXPIRATION', 3600))
+        expiration = request.data.get('expiration', getattr(settings, 'S3_URL_EXPIRATION', 86400))
         try:
             expiration = int(expiration)
             if expiration <= 0 or expiration > 86400:  # Max 24 hours
-                expiration = 3600
+                expiration = 86400
         except (ValueError, TypeError):
-            expiration = 3600
+            expiration = 86400
         
         # Generate the presigned URL
         presigned_url = generate_presigned_url(url, expiration)
