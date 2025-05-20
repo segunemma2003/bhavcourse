@@ -174,7 +174,7 @@ def generate_presigned_url(url, expiration=86400):
     
     Args:
         url (str): S3 URL
-        expiration (int): Expiration time in seconds (default: 1 hour)
+        expiration (int): Expiration time in seconds (default: 24 hours)
         
     Returns:
         str: Pre-signed URL or original URL if not an S3 URL or if error occurs
@@ -212,7 +212,10 @@ def generate_presigned_url(url, expiration=86400):
         env['AWS_SECRET_ACCESS_KEY'] = settings.AWS_SECRET_ACCESS_KEY
         env['AWS_DEFAULT_REGION'] = settings.AWS_REGION
         
-        # Create the AWS CLI command - using shell=True to handle spaces in the path
+        # Debug the actual expiration value being used
+        logger.info(f"Using expiration time of {expiration} seconds")
+        
+        # Create the AWS CLI command with the current expiration value (not hardcoded)
         cmd = f'aws s3 presign "{s3_path}" --region {settings.AWS_REGION} --expires-in {expiration}'
         
         # Run the command
@@ -226,13 +229,16 @@ def generate_presigned_url(url, expiration=86400):
         
         if process.returncode != 0:
             logger.error(f"Error generating presigned URL with AWS CLI: {process.stderr}")
+            # Log the full error message and command for debugging
+            logger.error(f"Command was: {cmd}")
+            logger.error(f"Full error: {process.stderr}")
             return url
         
         # Get the output URL and strip any whitespace
         presigned_url = process.stdout.strip()
         
         print(presigned_url)
-        logger.info(f"Generated presigned URL for s3://{bucket_name}/{object_key}")
+        logger.info(f"Generated presigned URL for s3://{bucket_name}/{object_key} with expiration {expiration}s")
         return presigned_url
         
     except Exception as e:
