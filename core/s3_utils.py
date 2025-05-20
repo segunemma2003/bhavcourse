@@ -88,7 +88,7 @@ def get_s3_key_and_bucket(url):
     
     return None, None
 
-def generate_presigned_url(url, expiration=3600):
+def generate_presigned_url(url, expiration=86400):
     """
     Generate a pre-signed URL for an S3 object with improved error handling.
     
