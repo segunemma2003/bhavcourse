@@ -34,13 +34,7 @@ def is_s3_url(url):
 
 def get_s3_key_and_bucket(url):
     """
-    Extract bucket and key from S3 URL with improved parsing.
-    
-    Args:
-        url (str): S3 URL
-        
-    Returns:
-        tuple: (bucket_name, object_key) or (None, None) if not valid
+    Extract bucket and key from S3 URL with improved parsing and URL decoding.
     """
     if not url:
         return None, None
@@ -48,44 +42,40 @@ def get_s3_key_and_bucket(url):
     # Handle s3:// protocol URLs
     s3_protocol_match = re.match(r'^s3://([^/]+)/(.+)$', url)
     if s3_protocol_match:
-        # URL decode the key (replace '+' with spaces)
-        key = s3_protocol_match.group(2).replace('+', ' ')
-        return s3_protocol_match.group(1), key
+        bucket = s3_protocol_match.group(1)
+        key = urlparse.unquote(s3_protocol_match.group(2))
+        return bucket, key
     
     # Handle bucket.s3.region.amazonaws.com/key format
     bucket_subdomain_match = re.match(r'^https?://([^.]+)\.s3[.-]([^.]*\.)?amazonaws\.com/(.+)$', url, re.IGNORECASE)
     if bucket_subdomain_match:
-        # URL decode the key (replace '+' with spaces)
-        key = bucket_subdomain_match.group(3).replace('+', ' ')
-        return bucket_subdomain_match.group(1), key
+        bucket = bucket_subdomain_match.group(1)
+        key = urlparse.unquote(bucket_subdomain_match.group(3))
+        return bucket, key
     
     # Handle s3.region.amazonaws.com/bucket/key format
     path_style_match = re.match(r'^https?://s3[.-]([^.]*\.)?amazonaws\.com/([^/]+)/(.+)$', url, re.IGNORECASE)
     if path_style_match:
-        # URL decode the key (replace '+' with spaces)
-        key = path_style_match.group(3).replace('+', ' ')
-        return path_style_match.group(2), key
+        bucket = path_style_match.group(2)
+        key = urlparse.unquote(path_style_match.group(3))
+        return bucket, key
     
-    # Fallback: parse as URL and extract from path
+    # Fallback: parse as standard URL
     try:
         parsed_url = urlparse(url)
         
-        # Check if host contains 's3'
-        if 's3' in parsed_url.netloc.lower():
-            # Extract bucket from subdomain if using virtual-hosted-style
-            if parsed_url.netloc.endswith('.amazonaws.com'):
-                netloc_parts = parsed_url.netloc.split('.')
-                if netloc_parts[0] != 's3':  # bucket.s3.region.amazonaws.com
-                    bucket_name = netloc_parts[0]
-                    # URL decode the key (replace '+' with spaces)
-                    object_key = parsed_url.path.lstrip('/').replace('+', ' ')
-                    return bucket_name, object_key
-                else:  # s3.region.amazonaws.com/bucket/key
-                    path_parts = parsed_url.path.strip('/').split('/', 1)
-                    if len(path_parts) >= 2:
-                        # URL decode the key (replace '+' with spaces)
-                        key = path_parts[1].replace('+', ' ')
-                        return path_parts[0], key
+        if 's3' in parsed_url.netloc.lower() and parsed_url.netloc.endswith('.amazonaws.com'):
+            netloc_parts = parsed_url.netloc.split('.')
+            if netloc_parts[0] != 's3':  # bucket.s3.region.amazonaws.com
+                bucket_name = netloc_parts[0]
+                object_key = urlparse.unquote(parsed_url.path.lstrip('/'))
+                return bucket_name, object_key
+            else:  # s3.region.amazonaws.com/bucket/key
+                path_parts = parsed_url.path.strip('/').split('/', 1)
+                if len(path_parts) >= 2:
+                    bucket = path_parts[0]
+                    key = urlparse.unquote(path_parts[1])
+                    return bucket, key
     except Exception as e:
         logger.error(f"Error parsing S3 URL {url}: {e}")
     
