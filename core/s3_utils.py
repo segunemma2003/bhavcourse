@@ -4,6 +4,9 @@ from urllib.parse import urlparse
 from django.conf import settings
 import logging
 from botocore.exceptions import ClientError, NoCredentialsError
+from botocore.client import Config
+from datetime import datetime, timezone
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -88,19 +91,49 @@ def get_s3_key_and_bucket(url):
     
     return None, None
 
+def get_credential_expiry_time(s3_client):
+    """
+    Get the expiry time of the current credentials if they are temporary.
+    
+    Args:
+        s3_client: boto3 S3 client
+        
+    Returns:
+        datetime or None: Expiry time if temporary credentials, None otherwise
+    """
+    try:
+        # Try to get STS credentials info
+        sts_client = boto3.client('sts', 
+                                 aws_access_key_id=s3_client._client_config.__dict__.get('_user_provided_options', {}).get('aws_access_key_id'),
+                                 aws_secret_access_key=s3_client._client_config.__dict__.get('_user_provided_options', {}).get('aws_secret_access_key'),
+                                 region_name=s3_client._client_config.region_name)
+        
+        # Get caller identity to check if using temporary credentials
+        identity = sts_client.get_caller_identity()
+        
+        # If using temporary credentials, the ARN will contain 'assumed-role'
+        if 'assumed-role' in identity.get('Arn', ''):
+            # This is a rough estimation - AWS temporary credentials from roles typically last 1 hour by default
+            # In practice, you might want to implement a more sophisticated method to track this
+            logger.warning("Using temporary credentials - presigned URLs may expire before requested time")
+            return None  # Can't determine exact expiry without additional AWS calls
+            
+    except Exception as e:
+        logger.debug(f"Could not determine credential type: {e}")
+    
+    return None
+
 def generate_presigned_url(url, expiration=86400):
     """
-    Generate a pre-signed URL for an S3 object with improved error handling.
+    Generate a pre-signed URL for an S3 object with improved error handling and credential awareness.
     
     Args:
         url (str): S3 URL
-        expiration (int): Expiration time in seconds (default: 1 hour)
+        expiration (int): Expiration time in seconds (default: 24 hours)
         
     Returns:
         str: Pre-signed URL or original URL if not an S3 URL or if error occurs
     """
-    expiration=86400
-    logger.info(f"Starting presigned URL generation with expiration: {expiration}")
     if not is_s3_url(url):
         logger.warning(f"URL is not an S3 URL: {url}")
         return url
@@ -121,18 +154,44 @@ def generate_presigned_url(url, expiration=86400):
             logger.error("AWS credentials or region not properly configured")
             return url
         
-        # Create S3 client with explicit configuration
+        # Create S3 client with explicit configuration and signature version
         s3_client = boto3.client(
             's3',
             aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
             aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-            region_name=settings.AWS_REGION
+            region_name=settings.AWS_REGION,
+            config=Config(signature_version='s3v4')  # Explicitly use v4 signatures
         )
+        
+        # Check if using temporary credentials and adjust expiration accordingly
+        try:
+            # For temporary credentials, limit expiration to maximum safe duration
+            sts_client = boto3.client('sts',
+                                    aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+                                    aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+                                    region_name=settings.AWS_REGION)
+            
+            identity = sts_client.get_caller_identity()
+            
+            # If using temporary credentials (like IAM roles), limit expiration
+            if 'assumed-role' in identity.get('Arn', ''):
+                # For temporary credentials, use shorter expiration (max 12 hours)
+                safe_expiration = min(expiration, 43200)  # 12 hours max
+                if safe_expiration != expiration:
+                    logger.warning(f"Using temporary credentials: reducing expiration from {expiration} to {safe_expiration} seconds")
+                expiration = safe_expiration
+                
+        except Exception as e:
+            logger.debug(f"Could not check credential type: {e}")
+            # If we can't determine, use a safer default for potential temporary credentials
+            if expiration > 43200:  # More than 12 hours
+                logger.warning("Cannot determine credential type - limiting expiration to 12 hours for safety")
+                expiration = 43200
         
         # Verify the object exists before generating presigned URL
         try:
             s3_client.head_object(Bucket=bucket_name, Key=object_key)
-            logger.info(f"Object exists: s3://{bucket_name}/{object_key}")
+            logger.debug(f"Object exists: s3://{bucket_name}/{object_key}")
         except ClientError as e:
             if e.response['Error']['Code'] == '404':
                 logger.error(f"Object not found: s3://{bucket_name}/{object_key}")
@@ -141,29 +200,39 @@ def generate_presigned_url(url, expiration=86400):
                 logger.error(f"Error checking object existence: {e}")
                 return url
         
-        # Generate presigned URL
-        presigned_url = s3_client.generate_presigned_url(
-            'get_object',
-            Params={
-                'Bucket': bucket_name,
-                'Key': object_key
-            },
-            ExpiresIn=expiration
-        )
-        print(presigned_url)
-        import re
-        expires_match = re.search(r'X-Amz-Expires=(\d+)', presigned_url)
-        if expires_match:
-            actual_expiration = expires_match.group(1)
-            logger.warning(f"Requested expiration: {expiration} but got: {actual_expiration}")
-        logger.info(f"Generated presigned URL for s3://{bucket_name}/{object_key}")
-        return presigned_url
-        
+        # Generate presigned URL with error handling
+        try:
+            presigned_url = s3_client.generate_presigned_url(
+                'get_object',
+                Params={
+                    'Bucket': bucket_name,
+                    'Key': object_key
+                },
+                ExpiresIn=expiration
+            )
+            
+            # Log successful generation
+            logger.info(f"Generated presigned URL for s3://{bucket_name}/{object_key} with {expiration}s expiration")
+            
+            # Verify the URL was actually generated (not just returned as original)
+            if presigned_url and presigned_url != url and 'X-Amz-Signature' in presigned_url:
+                return presigned_url
+            else:
+                logger.error("Failed to generate valid presigned URL")
+                return url
+                
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'TokenRefreshRequired':
+                logger.error("AWS token refresh required - credentials may be expired")
+            else:
+                logger.error(f"AWS ClientError generating presigned URL: {e}")
+            return url
+            
     except NoCredentialsError:
         logger.error("AWS credentials not found")
         return url
     except ClientError as e:
-        logger.error(f"AWS ClientError generating presigned URL: {e}")
+        logger.error(f"AWS ClientError: {e}")
         return url
     except Exception as e:
         logger.error(f"Unexpected error generating presigned URL: {e}")
@@ -171,7 +240,7 @@ def generate_presigned_url(url, expiration=86400):
 
 def check_s3_connectivity():
     """
-    Test S3 connectivity and permissions.
+    Test S3 connectivity and permissions with enhanced credential checking.
     
     Returns:
         dict: Status information about S3 connectivity
@@ -193,8 +262,22 @@ def check_s3_connectivity():
             's3',
             aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
             aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-            region_name=settings.AWS_REGION
+            region_name=settings.AWS_REGION,
+            config=Config(signature_version='s3v4')
         )
+        
+        # Check credential type
+        try:
+            sts_client = boto3.client('sts',
+                                    aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+                                    aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+                                    region_name=settings.AWS_REGION)
+            
+            identity = sts_client.get_caller_identity()
+            credential_type = "temporary" if 'assumed-role' in identity.get('Arn', '') else "permanent"
+            
+        except Exception:
+            credential_type = "unknown"
         
         # List buckets (simplest test)
         response = s3_client.list_buckets()
@@ -202,7 +285,9 @@ def check_s3_connectivity():
         return {
             'success': True,
             'buckets': [bucket['Name'] for bucket in response.get('Buckets', [])],
-            'region': settings.AWS_REGION
+            'region': settings.AWS_REGION,
+            'credential_type': credential_type,
+            'max_safe_expiration': 43200 if credential_type == "temporary" else 604800  # 12h vs 7d
         }
         
     except NoCredentialsError:
@@ -221,10 +306,9 @@ def check_s3_connectivity():
             'error': f'Unexpected error: {str(e)}'
         }
 
-# Additional utility for debugging
 def debug_s3_url_parsing(url):
     """
-    Debug function to test URL parsing.
+    Debug function to test URL parsing with enhanced information.
     
     Args:
         url (str): URL to test
@@ -242,12 +326,46 @@ def debug_s3_url_parsing(url):
                 'matches': bool(re.match(pattern, url, re.IGNORECASE))
             }
             for pattern in S3_URL_PATTERNS
-        ]
+        ],
+        'connectivity_test': check_s3_connectivity()
     }
-    
-url = "https://bybhavaniapp.s3.ap-south-1.amazonaws.com/Anarkali+16+Panel/Chapter+1+Anarkali+Paper+Drafting.mp4"
-debug_info = generate_presigned_url(url)
-print(debug_info)
 
-# Should generate the same command as what you manually used:
-# aws s3 presign "s3://bybhavaniapp/Anarkali 16 Panel/Chapter 1 Anarkali Paper Drafting.mp4" --region ap-south-1 --expires-in 86400
+# Enhanced caching mechanism for presigned URLs
+_presigned_url_cache = {}
+_cache_duration = 3600  # 1 hour cache duration
+
+def get_cached_presigned_url(url, expiration=86400):
+    """
+    Get presigned URL with caching to reduce AWS API calls.
+    
+    Args:
+        url (str): S3 URL
+        expiration (int): Expiration time in seconds
+        
+    Returns:
+        str: Cached or newly generated presigned URL
+    """
+    current_time = time.time()
+    cache_key = f"{url}_{expiration}"
+    
+    # Check if we have a valid cached URL
+    if cache_key in _presigned_url_cache:
+        cached_url, cached_time = _presigned_url_cache[cache_key]
+        
+        # If cache is still valid (within 1 hour), return cached URL
+        if current_time - cached_time < _cache_duration:
+            logger.debug(f"Returning cached presigned URL for {url}")
+            return cached_url
+        else:
+            # Remove expired cache entry
+            del _presigned_url_cache[cache_key]
+    
+    # Generate new presigned URL
+    presigned_url = generate_presigned_url(url, expiration)
+    
+    # Cache the result if it's valid
+    if presigned_url != url:  # Only cache if we got a real presigned URL
+        _presigned_url_cache[cache_key] = (presigned_url, current_time)
+        logger.debug(f"Cached new presigned URL for {url}")
+    
+    return presigned_url

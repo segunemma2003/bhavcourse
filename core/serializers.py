@@ -208,11 +208,13 @@ class CourseCurriculumSerializer(serializers.ModelSerializer):
     
     def get_video_url(self, obj):
         """
-        Generate a presigned URL for S3 videos
+        Generate a presigned URL for S3 videos with caching
         """
         url = obj.video_url
         if url and is_s3_url(url):
-            return generate_presigned_url(url)
+            # Use cached presigned URL generation
+            from core.s3_utils import get_cached_presigned_url
+            return get_cached_presigned_url(url, expiration=43200)  # 12 hour expiration for safety
         return url
     
     def to_representation(self, instance):
