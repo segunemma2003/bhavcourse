@@ -7,6 +7,7 @@ from botocore.exceptions import ClientError, NoCredentialsError
 from botocore.client import Config
 from datetime import datetime, timezone
 import time
+import urllib.parse
 
 logger = logging.getLogger(__name__)
 
@@ -39,42 +40,46 @@ def get_s3_key_and_bucket(url):
     if not url:
         return None, None
     
+    # First, check if this is already a presigned URL and extract the base URL
+    parsed_url = urlparse(url)
+    
+    # Remove query parameters to get the base S3 URL
+    base_url = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}"
+    
     # Handle s3:// protocol URLs
-    s3_protocol_match = re.match(r'^s3://([^/]+)/(.+)$', url)
+    s3_protocol_match = re.match(r'^s3://([^/]+)/(.+)$', base_url)
     if s3_protocol_match:
         bucket = s3_protocol_match.group(1)
-        key = urlparse.unquote(s3_protocol_match.group(2))
+        key = urllib.parse.unquote(s3_protocol_match.group(2))
         return bucket, key
     
     # Handle bucket.s3.region.amazonaws.com/key format
-    bucket_subdomain_match = re.match(r'^https?://([^.]+)\.s3[.-]([^.]*\.)?amazonaws\.com/(.+)$', url, re.IGNORECASE)
+    bucket_subdomain_match = re.match(r'^https?://([^.]+)\.s3[.-]([^.]*\.)?amazonaws\.com/(.+)$', base_url, re.IGNORECASE)
     if bucket_subdomain_match:
         bucket = bucket_subdomain_match.group(1)
-        key = urlparse.unquote(bucket_subdomain_match.group(3))
+        key = urllib.parse.unquote(bucket_subdomain_match.group(3))
         return bucket, key
     
     # Handle s3.region.amazonaws.com/bucket/key format
-    path_style_match = re.match(r'^https?://s3[.-]([^.]*\.)?amazonaws\.com/([^/]+)/(.+)$', url, re.IGNORECASE)
+    path_style_match = re.match(r'^https?://s3[.-]([^.]*\.)?amazonaws\.com/([^/]+)/(.+)$', base_url, re.IGNORECASE)
     if path_style_match:
         bucket = path_style_match.group(2)
-        key = urlparse.unquote(path_style_match.group(3))
+        key = urllib.parse.unquote(path_style_match.group(3))
         return bucket, key
     
     # Fallback: parse as standard URL
     try:
-        parsed_url = urlparse(url)
-        
         if 's3' in parsed_url.netloc.lower() and parsed_url.netloc.endswith('.amazonaws.com'):
             netloc_parts = parsed_url.netloc.split('.')
             if netloc_parts[0] != 's3':  # bucket.s3.region.amazonaws.com
                 bucket_name = netloc_parts[0]
-                object_key = urlparse.unquote(parsed_url.path.lstrip('/'))
+                object_key = urllib.parse.unquote(parsed_url.path.lstrip('/'))
                 return bucket_name, object_key
             else:  # s3.region.amazonaws.com/bucket/key
                 path_parts = parsed_url.path.strip('/').split('/', 1)
                 if len(path_parts) >= 2:
                     bucket = path_parts[0]
-                    key = urlparse.unquote(path_parts[1])
+                    key = urllib.parse.unquote(path_parts[1])
                     return bucket, key
     except Exception as e:
         logger.error(f"Error parsing S3 URL {url}: {e}")
