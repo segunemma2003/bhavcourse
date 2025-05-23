@@ -160,6 +160,12 @@ class Course(models.Model):
     def enrolled_students(self):
         return self.enrollments.count()
     
+    @property
+    def is_expired(self):
+        if self.plan_type == CoursePlanType.LIFETIME:
+            return False
+        return timezone.now() >= self.expiry_date if self.expiry_date else False
+    
 class CoursePlanType(models.TextChoices):
     ONE_MONTH = 'ONE_MONTH', 'One Month'
     THREE_MONTHS = 'THREE_MONTHS', 'Three Months'

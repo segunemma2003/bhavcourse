@@ -270,6 +270,7 @@ class CourseDetailSerializer(serializers.ModelSerializer):
     is_enrolled = serializers.SerializerMethodField()
     is_wishlisted = serializers.SerializerMethodField()
     user_enrollment = serializers.SerializerMethodField()
+    enrollment_status = serializers.SerializerMethodField() 
     
     class Meta:
         model = Course
@@ -279,16 +280,24 @@ class CourseDetailSerializer(serializers.ModelSerializer):
             'location', 'enrolled_students', 'objectives',
             'requirements', 'curriculum', 'is_enrolled', 'is_wishlisted',
             'price_one_month', 'price_three_months', 'price_lifetime',
-            'user_enrollment'
+            'user_enrollment', 'enrollment_status'
         ]
     
     def get_enrolled_students(self, obj):
         return obj.enrollments.count()
     
     def get_is_enrolled(self, obj):
+        """Check if user has an active, non-expired enrollment"""
         request = self.context.get('request')
         if request and request.user.is_authenticated:
-            return obj.enrollments.filter(user=request.user, is_active=True).exists()
+            enrollment = obj.enrollments.filter(
+                user=request.user,
+                is_active=True
+            ).first()
+            
+            if enrollment:
+                return not enrollment.is_expired
+            return False
         return False
     
     def get_is_wishlisted(self, obj):
@@ -311,6 +320,45 @@ class CourseDetailSerializer(serializers.ModelSerializer):
                     'is_expired': enrollment.is_expired
                 }
         return None
+    def get_enrollment_status(self, obj):
+        """Get detailed enrollment status for authenticated users"""
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            enrollment = obj.enrollments.filter(user=request.user).first()
+            
+            if not enrollment:
+                return {
+                    'status': 'not_enrolled',
+                    'message': 'User is not enrolled in this course'
+                }
+            
+            if not enrollment.is_active:
+                return {
+                    'status': 'inactive',
+                    'message': 'Enrollment is inactive'
+                }
+            
+            if enrollment.is_expired:
+                return {
+                    'status': 'expired',
+                    'message': 'Enrollment has expired',
+                    'expired_on': enrollment.expiry_date
+                }
+            
+            # Active and not expired
+            return {
+                'status': 'active',
+                'message': 'User has active access to this course',
+                'plan_type': enrollment.plan_type,
+                'plan_name': enrollment.get_plan_type_display(),
+                'expires_on': enrollment.expiry_date if enrollment.plan_type != CoursePlanType.LIFETIME else None,
+                'is_lifetime': enrollment.plan_type == CoursePlanType.LIFETIME
+            }
+        
+        return {
+            'status': 'unauthenticated',
+            'message': 'User not authenticated'
+        }
 
 class CourseCreateUpdateSerializer(serializers.ModelSerializer):
     objectives = CourseObjectiveSerializer(many=True, required=False)  # Change this to required=False
@@ -701,9 +749,17 @@ class CourseListSerializer(serializers.ModelSerializer):
         ]
     
     def get_is_enrolled(self, obj):
+        """Check if user has an active, non-expired enrollment"""
         request = self.context.get('request')
         if request and request.user.is_authenticated:
-            return Enrollment.objects.filter(user=request.user, course=obj).exists()
+            enrollment = obj.enrollments.filter(
+                user=request.user,
+                is_active=True
+            ).first()
+            
+            if enrollment:
+                return not enrollment.is_expired
+            return False
         return False
     
     def get_is_wishlisted(self, obj):
