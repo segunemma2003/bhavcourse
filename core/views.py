@@ -7,6 +7,8 @@ from django.utils import timezone
 from django.core.mail import send_mail
 from django.conf import settings
 from django.db.models import Q
+
+from core.permissions import IsEnrolledOrAdmin
 from .services import RazorpayService,  process_course_purchase
 from .tasks import send_push_notification
 from django.db import transaction
@@ -1632,7 +1634,7 @@ class CourseObjectiveViewSet(viewsets.ModelViewSet):
     API endpoints for managing course objectives.
     """
     serializer_class = CourseObjectiveSerializer
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    permission_classes = []
     
     def get_queryset(self):
         """
@@ -1738,7 +1740,7 @@ class CourseRequirementViewSet(viewsets.ModelViewSet):
     API endpoints for managing course requirements.
     """
     serializer_class = CourseRequirementSerializer
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    permission_classes = []
     
     def get_queryset(self):
         """
@@ -1844,7 +1846,15 @@ class CourseCurriculumViewSet(viewsets.ModelViewSet):
     API endpoints for managing course curriculum items.
     """
     serializer_class = CourseCurriculumSerializer
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    
+    def get_permissions(self):
+        """
+        Allow enrolled users to view, require admin for write operations
+        """
+        if self.action in ['list', 'retrieve']:
+            return [IsEnrolledOrAdmin()]
+        return [permissions.IsAuthenticated(), permissions.IsAdminUser()]
+    
     
     def get_queryset(self):
         """
