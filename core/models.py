@@ -197,10 +197,13 @@ class Enrollment(models.Model):
     def save(self, *args, **kwargs):
         # Calculate expiry date if not a lifetime plan
         if not self.expiry_date and self.plan_type != CoursePlanType.LIFETIME:
+            # Use current time if date_enrolled is None
+            base_date = self.date_enrolled or timezone.now()
+            
             if self.plan_type == CoursePlanType.ONE_MONTH:
-                self.expiry_date = self.date_enrolled + timezone.timedelta(days=30)
+                self.expiry_date = base_date + timezone.timedelta(days=30)
             elif self.plan_type == CoursePlanType.THREE_MONTHS:
-                self.expiry_date = self.date_enrolled + timezone.timedelta(days=90)
+                self.expiry_date = base_date + timezone.timedelta(days=90)
         
         super().save(*args, **kwargs)
     
