@@ -1406,7 +1406,18 @@ class AdminBulkEnrollmentOperationsView(generics.CreateAPIView):
                                 'total_processed': openapi.Schema(type=openapi.TYPE_INTEGER),
                                 'successful': openapi.Schema(type=openapi.TYPE_INTEGER),
                                 'failed': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                'results': openapi.Schema(type=openapi.TYPE_ARRAY)
+                               'results': openapi.Schema(
+                                        type=openapi.TYPE_ARRAY,
+                                        items=openapi.Schema(
+                                            type=openapi.TYPE_OBJECT,
+                                            properties={
+                                                'index': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                                'status': openapi.Schema(type=openapi.TYPE_STRING),
+                                                'message': openapi.Schema(type=openapi.TYPE_STRING),
+                                                'data': openapi.Schema(type=openapi.TYPE_OBJECT)
+                                            }
+                                        )
+                                    )
                             }
                         )
                     }
