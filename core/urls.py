@@ -10,7 +10,7 @@ from .views import (
     CategoryViewSet, CourseCurriculumViewSet, CourseObjectiveViewSet, CourseRequirementViewSet, CourseViewSet, 
     EnrollmentViewSet, NotificationViewSet, ProfilePictureDeleteView, ProfilePictureRetrieveView, ProfilePictureUploadView, PublicCourseDetailView, SimpleEnrollmentViewSet, SubscriptionPlanViewSet, UserProfileView, UserSubscriptionViewSet, 
     WishlistViewSet, PaymentCardViewSet, PurchaseViewSet, UpdateProfileView, LogoutView, DeleteAccountView, 
-    FCMDeviceViewSet, debug_login, CoursePurchaseView  # Added the new view
+    FCMDeviceViewSet, debug_enrollments, debug_login, CoursePurchaseView  # Added the new view
 )
 from .auth_views import CustomLoginView, CustomRegisterView, ForgotPasswordView, ResetPasswordView, VerifyOTPView, GoogleLoginView
 
@@ -119,6 +119,6 @@ urlpatterns = [
       path('admin/add-student-to-plan/', AdminAddStudentToPlanView.as_view(), name='admin-add-student-to-plan'),
       path('admin/remove-student-from-plan/', AdminRemoveStudentFromPlanView.as_view(), name='admin-remove-student-from-plan'),
     path('admin/bulk-enrollment-operations/', AdminBulkEnrollmentOperationsView.as_view(), name='admin-bulk-enrollment-operations'),
- 
+ path('debug-enrollments/', debug_enrollments, name='debug-enrollments'),
     
 ]
