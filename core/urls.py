@@ -8,7 +8,7 @@ from core.payment_views import CreateOrderView, VerifyPaymentView, cancel_subscr
 from core.views_presign import GeneratePresignedURLView, S3DebugView
 from .views import (
     CategoryViewSet, CourseCurriculumViewSet, CourseObjectiveViewSet, CourseRequirementViewSet, CourseViewSet, 
-    EnrollmentViewSet, NotificationViewSet, ProfilePictureDeleteView, ProfilePictureRetrieveView, ProfilePictureUploadView, PublicCourseDetailView, SubscriptionPlanViewSet, UserProfileView, UserSubscriptionViewSet, 
+    EnrollmentViewSet, NotificationViewSet, ProfilePictureDeleteView, ProfilePictureRetrieveView, ProfilePictureUploadView, PublicCourseDetailView, SimpleEnrollmentViewSet, SubscriptionPlanViewSet, UserProfileView, UserSubscriptionViewSet, 
     WishlistViewSet, PaymentCardViewSet, PurchaseViewSet, UpdateProfileView, LogoutView, DeleteAccountView, 
     FCMDeviceViewSet, debug_login, CoursePurchaseView  # Added the new view
 )
@@ -26,6 +26,7 @@ router.register(r'purchase-history', PurchaseViewSet, basename='purchase')
 router.register(r'notifications', NotificationViewSet, basename='notification')
 router.register(r'devices', FCMDeviceViewSet, basename='device')
 router.register(r'content-pages', ContentPageViewSet, basename='content-page')
+router.register(r'testenrollments', SimpleEnrollmentViewSet, basename='testenrollment')
 
 urlpatterns = [
     path('', include(router.urls)),

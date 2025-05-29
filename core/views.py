@@ -2,6 +2,7 @@ import hashlib
 from rest_framework.response import Response
 from django.contrib.auth import get_user_model, authenticate
 from rest_framework import viewsets, permissions, filters, status, generics, serializers
+from rest_framework.decorators import api_view, permission_classes
 from rest_framework.decorators import action
 from django.db.models import Count
 from django.utils import timezone
@@ -856,83 +857,140 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
         if getattr(self, 'swagger_fake_view', False):
             return self.queryset
         
-        # OPTIMIZED QUERY - This reduces queries from 100+ to under 10
-        return Enrollment.objects.filter(
-            user=self.request.user
-        ).select_related(
-            'course',                    # Gets course in the same query
-            'course__category'           # Gets course category in the same query
-        ).prefetch_related(
-            # Prefetch course objectives (separate optimized query)
-            models.Prefetch(
-                'course__objectives',
-                queryset=CourseObjective.objects.all()
-            ),
-            # Prefetch course requirements (separate optimized query)
-            models.Prefetch(
-                'course__requirements', 
-                queryset=CourseRequirement.objects.all()
-            ),
-            # Prefetch course curriculum (separate optimized query)
-            models.Prefetch(
-                'course__curriculum',
-                queryset=CourseCurriculum.objects.order_by('order')
-            ),
-            # Prefetch course enrollments for count (separate optimized query)
-            models.Prefetch(
-                'course__enrollments',
-                queryset=Enrollment.objects.select_related('user')
-            )
-        ).order_by('-date_enrolled')  # Order by most recent first
+        try:
+            # OPTIMIZED QUERY - This reduces queries from 100+ to under 10
+            return Enrollment.objects.filter(
+                user=self.request.user
+            ).select_related(
+                'course',                    # Gets course in the same query
+                'course__category'           # Gets course category in the same query
+            ).prefetch_related(
+                # Prefetch course objectives (separate optimized query)
+                models.Prefetch(
+                    'course__objectives',
+                    queryset=CourseObjective.objects.all()
+                ),
+                # Prefetch course requirements (separate optimized query)
+                models.Prefetch(
+                    'course__requirements', 
+                    queryset=CourseRequirement.objects.all()
+                ),
+                # Prefetch course curriculum (separate optimized query)
+                models.Prefetch(
+                    'course__curriculum',
+                    queryset=CourseCurriculum.objects.order_by('order')
+                ),
+                # Prefetch course enrollments for count (separate optimized query)
+                models.Prefetch(
+                    'course__enrollments',
+                    queryset=Enrollment.objects.select_related('user')
+                )
+            ).order_by('-date_enrolled')  # Order by most recent first
+            
+        except Exception as e:
+            logger.error(f"Error in get_queryset: {str(e)}")
+            # Fallback to simple query if optimization fails
+            return Enrollment.objects.filter(user=self.request.user).order_by('-date_enrolled')
     
     def list(self, request, *args, **kwargs):
         """
-        OPTIMIZED: Add caching to avoid repeated expensive queries
+        OPTIMIZED: Add caching to avoid repeated expensive queries with better error handling
         """
-        # Create cache key based on user and query parameters
-        cache_key = self._get_cache_key(request)
-        
-        # Try to get from cache first (5 minute cache)
-        cached_data = cache.get(cache_key)
-        if cached_data:
-            return Response(cached_data)
-        
-        # If not in cache, get from database with optimized query
-        response = super().list(request, *args, **kwargs)
-        
-        # Cache the response for 5 minutes
-        cache.set(cache_key, response.data, 300)
-        
-        return response
+        try:
+            # Create cache key based on user and query parameters
+            cache_key = self._get_cache_key(request)
+            
+            # Try to get from cache first (5 minute cache)
+            cached_data = cache.get(cache_key)
+            if cached_data:
+                logger.info(f"Returning cached enrollment data for user {request.user.id}")
+                return Response(cached_data)
+            
+            # If not in cache, get from database with optimized query
+            logger.info(f"Fetching fresh enrollment data for user {request.user.id}")
+            
+            # Get the queryset
+            queryset = self.get_queryset()
+            logger.info(f"Queryset retrieved successfully, count: {queryset.count()}")
+            
+            # Apply pagination
+            page = self.paginate_queryset(queryset)
+            if page is not None:
+                serializer = self.get_serializer(page, many=True)
+                paginated_response = self.get_paginated_response(serializer.data)
+                
+                # Cache the paginated response for 5 minutes
+                cache.set(cache_key, paginated_response.data, 300)
+                logger.info(f"Cached paginated enrollment data for user {request.user.id}")
+                
+                return paginated_response
+            
+            # Non-paginated response (fallback)
+            serializer = self.get_serializer(queryset, many=True)
+            response_data = serializer.data
+            
+            # Cache for 5 minutes
+            cache.set(cache_key, response_data, 300)
+            logger.info(f"Cached non-paginated enrollment data for user {request.user.id}")
+            
+            return Response(response_data)
+            
+        except Exception as e:
+            logger.error(f"Error in enrollment list view for user {request.user.id}: {str(e)}")
+            logger.error(f"Error type: {type(e).__name__}")
+            logger.error(f"Error args: {e.args}")
+            
+            # Return error response instead of crashing
+            return Response(
+                {
+                    "error": "Failed to fetch enrollments",
+                    "detail": str(e),
+                    "user_id": request.user.id
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
     
     def retrieve(self, request, *args, **kwargs):
         """
-        OPTIMIZED: Add caching for individual enrollment details
+        OPTIMIZED: Add caching for individual enrollment details with error handling
         """
-        enrollment_id = kwargs.get('pk')
-        cache_key = f"enrollment_detail_{request.user.id}_{enrollment_id}"
-        
-        # Try cache first
-        cached_data = cache.get(cache_key)
-        if cached_data:
-            return Response(cached_data)
-        
-        # Get from database with optimized query
-        response = super().retrieve(request, *args, **kwargs)
-        
-        # Cache for 10 minutes
-        cache.set(cache_key, response.data, 600)
-        
-        return response
+        try:
+            enrollment_id = kwargs.get('pk')
+            cache_key = f"enrollment_detail_{request.user.id}_{enrollment_id}"
+            
+            # Try cache first
+            cached_data = cache.get(cache_key)
+            if cached_data:
+                return Response(cached_data)
+            
+            # Get from database with optimized query
+            response = super().retrieve(request, *args, **kwargs)
+            
+            # Cache for 10 minutes
+            cache.set(cache_key, response.data, 600)
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Error in enrollment retrieve view: {str(e)}")
+            return Response(
+                {"error": "Failed to fetch enrollment details", "detail": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
     
     def _get_cache_key(self, request):
         """Generate cache key based on user and query parameters"""
-        user_id = request.user.id
-        page = request.query_params.get('page', '1')
-        page_size = request.query_params.get('page_size', '20')
-        
-        key_string = f"enrollments_{user_id}_{page}_{page_size}"
-        return hashlib.md5(key_string.encode()).hexdigest()
+        try:
+            user_id = request.user.id
+            page = request.query_params.get('page', '1')
+            page_size = request.query_params.get('page_size', '20')
+            
+            key_string = f"enrollments_{user_id}_{page}_{page_size}"
+            return hashlib.md5(key_string.encode()).hexdigest()
+        except Exception as e:
+            logger.error(f"Error generating cache key: {str(e)}")
+            # Return a simple fallback key
+            return f"enrollments_{request.user.id}_fallback"
     
     def _clear_user_cache(self, user_id):
         """Clear enrollment cache when data changes"""
@@ -943,78 +1001,132 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
                     key_string = f"enrollments_{user_id}_{page}_{page_size}"
                     cache_key = hashlib.md5(key_string.encode()).hexdigest()
                     cache.delete(cache_key)
-        except Exception:
+            logger.info(f"Cleared enrollment cache for user {user_id}")
+        except Exception as e:
+            logger.error(f"Error clearing cache for user {user_id}: {str(e)}")
             pass  # Don't break functionality if cache clearing fails
     
     def create(self, request, *args, **kwargs):
-        # Clear user's enrollment cache when creating new enrollment
-        self._clear_user_cache(request.user.id)
-        
-        # Redirect to create order view for payment processing
-        from .payment_views import CreateOrderView
-        return CreateOrderView.as_view()(request)
+        try:
+            # Clear user's enrollment cache when creating new enrollment
+            self._clear_user_cache(request.user.id)
+            
+            # Redirect to create order view for payment processing
+            from .payment_views import CreateOrderView
+            return CreateOrderView.as_view()(request)
+        except Exception as e:
+            logger.error(f"Error in enrollment create: {str(e)}")
+            return Response(
+                {"error": "Failed to create enrollment", "detail": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
     
     def destroy(self, request, *args, **kwargs):
-        # Clear user's enrollment cache when deleting
-        self._clear_user_cache(request.user.id)
-        return super().destroy(request, *args, **kwargs)
+        try:
+            # Clear user's enrollment cache when deleting
+            self._clear_user_cache(request.user.id)
+            return super().destroy(request, *args, **kwargs)
+        except Exception as e:
+            logger.error(f"Error in enrollment destroy: {str(e)}")
+            return Response(
+                {"error": "Failed to delete enrollment", "detail": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
     
     @action(detail=False, methods=['post'])
     def verify_payment(self, request):
-        # Clear user's enrollment cache after payment verification
-        self._clear_user_cache(request.user.id)
-        
-        # Redirect to verify payment view
-        from .payment_views import VerifyPaymentView
-        return VerifyPaymentView.as_view()(request)
+        try:
+            # Clear user's enrollment cache after payment verification
+            self._clear_user_cache(request.user.id)
+            
+            # Redirect to verify payment view
+            from .payment_views import VerifyPaymentView
+            return VerifyPaymentView.as_view()(request)
+        except Exception as e:
+            logger.error(f"Error in verify_payment: {str(e)}")
+            return Response(
+                {"error": "Failed to verify payment", "detail": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
     
     @action(detail=False, methods=['get'])
     def check_status(self, request):
-        course_id = request.query_params.get('course_id')
-        if not course_id:
-            return Response(
-                {"error": "course_id parameter is required"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # OPTIMIZED: Add caching for enrollment status checks
-        cache_key = f"enrollment_status_{request.user.id}_{course_id}"
-        cached_result = cache.get(cache_key)
-        if cached_result:
-            return Response(cached_result)
-        
-        # OPTIMIZED: Use select_related for efficient database query
-        is_enrolled = Enrollment.objects.select_related('course').filter(
-            user=request.user, 
-            course_id=course_id
-        ).exists()
-        
-        # Get subscription details if enrolled
-        subscription_details = None
-        if is_enrolled:
-            # OPTIMIZED: Use select_related for subscription query
-            subscription = UserSubscription.objects.select_related('plan').filter(
-                user=request.user,
-                is_active=True,
-                end_date__gt=timezone.now()
-            ).first()
+        try:
+            course_id = request.query_params.get('course_id')
+            if not course_id:
+                return Response(
+                    {"error": "course_id parameter is required"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
             
-            if subscription:
-                subscription_details = {
-                    'plan_name': subscription.plan.name,
-                    'end_date': subscription.end_date,
-                    'is_active': subscription.is_active
-                }
-        
-        result = {
-            'is_enrolled': is_enrolled,
-            'subscription_details': subscription_details
-        }
-        
-        # Cache for 2 minutes
-        cache.set(cache_key, result, 120)
-        
-        return Response(result)
+            # OPTIMIZED: Add caching for enrollment status checks
+            cache_key = f"enrollment_status_{request.user.id}_{course_id}"
+            cached_result = cache.get(cache_key)
+            if cached_result:
+                return Response(cached_result)
+            
+            # OPTIMIZED: Use select_related for efficient database query
+            is_enrolled = Enrollment.objects.select_related('course').filter(
+                user=request.user, 
+                course_id=course_id
+            ).exists()
+            
+            # Get subscription details if enrolled
+            subscription_details = None
+            if is_enrolled:
+                # OPTIMIZED: Use select_related for subscription query
+                subscription = UserSubscription.objects.select_related('plan').filter(
+                    user=request.user,
+                    is_active=True,
+                    end_date__gt=timezone.now()
+                ).first()
+                
+                if subscription:
+                    subscription_details = {
+                        'plan_name': subscription.plan.name,
+                        'end_date': subscription.end_date,
+                        'is_active': subscription.is_active
+                    }
+            
+            result = {
+                'is_enrolled': is_enrolled,
+                'subscription_details': subscription_details
+            }
+            
+            # Cache for 2 minutes
+            cache.set(cache_key, result, 120)
+            
+            return Response(result)
+            
+        except Exception as e:
+            logger.error(f"Error in check_status: {str(e)}")
+            return Response(
+                {"error": "Failed to check enrollment status", "detail": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+            
+class SimpleEnrollmentViewSet(viewsets.ModelViewSet):
+    """
+    Simple fallback enrollment viewset without optimizations
+    Use this if the optimized version is causing issues
+    """
+    serializer_class = EnrollmentSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_queryset(self):
+        if getattr(self, 'swagger_fake_view', False):
+            return Enrollment.objects.none()
+        return Enrollment.objects.filter(user=self.request.user).order_by('-date_enrolled')
+    
+    def list(self, request, *args, **kwargs):
+        try:
+            return super().list(request, *args, **kwargs)
+        except Exception as e:
+            logger.error(f"Error in simple enrollment list: {str(e)}")
+            return Response(
+                {"error": "Failed to fetch enrollments", "detail": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 class SubscriptionPlanViewSet(viewsets.ModelViewSet):
     """
@@ -2453,3 +2565,21 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
             UserDetailsSerializer(user).data,
             status=status.HTTP_200_OK
         )
+
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def debug_enrollments(request):
+    try:
+        enrollments = Enrollment.objects.filter(user=request.user)
+        return Response({
+            "count": enrollments.count(),
+            "user_id": request.user.id,
+            "status": "success"
+        })
+    except Exception as e:
+        return Response({
+            "error": str(e),
+            "error_type": type(e).__name__,
+            "user_id": request.user.id
+        })
