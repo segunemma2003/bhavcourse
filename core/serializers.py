@@ -51,6 +51,42 @@ class AdminAddStudentSerializer(serializers.Serializer):
     class Meta:
         ref_name = "AdminAddStudentSerializer"
         
+class AdminRemoveStudentSerializer(serializers.Serializer):
+    """Serializer for admin removing student from subscription plan"""
+    user_id = serializers.IntegerField(help_text="ID of the user to remove")
+    course_id = serializers.IntegerField(help_text="ID of the course to remove from")
+    reason = serializers.CharField(
+        max_length=500, 
+        required=False, 
+        allow_blank=True,
+        help_text="Reason for removal"
+    )
+    refund_amount = serializers.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        required=False,
+        allow_null=True,
+        help_text="Refund amount (optional)"
+    )
+    
+    class Meta:
+        ref_name = "AdminRemoveStudentSerializer"
+
+class AdminBulkEnrollmentSerializer(serializers.Serializer):
+    """Serializer for bulk enrollment operations"""
+    operation = serializers.ChoiceField(
+        choices=['add', 'remove'],
+        help_text="Operation type: add or remove"
+    )
+    enrollments = serializers.ListField(
+        child=serializers.DictField(),
+        help_text="List of enrollment operations"
+    )
+    
+    class Meta:
+        ref_name = "AdminBulkEnrollmentSerializer"
+        
+        
 class UserDetailsSerializer(serializers.ModelSerializer):
     profile_picture_url = serializers.SerializerMethodField()
     

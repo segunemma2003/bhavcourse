@@ -1176,7 +1176,7 @@ class AdminAddStudentToPlanView(generics.CreateAPIView):
                     cache_key = hashlib.md5(key_string.encode()).hexdigest()
                     cache.delete(cache_key)
         except Exception:
-            pass
+            pass  # Don't break functionality if cache clearing fai
         
 class AdminRemoveStudentFromPlanView(generics.DestroyAPIView):
     """
@@ -1663,7 +1663,8 @@ class AdminBulkEnrollmentOperationsView(generics.CreateAPIView):
             defaults={
                 'plan_type': plan_type,
                 'amount_paid': amount_paid,
-                'is_active': True
+                'is_active': True,
+                'date_enrolled': timezone.now()  # Set date_enrolled explicitly
             }
         )
         
@@ -1671,13 +1672,15 @@ class AdminBulkEnrollmentOperationsView(generics.CreateAPIView):
             enrollment.plan_type = plan_type
             enrollment.amount_paid = amount_paid
             enrollment.is_active = True
+            enrollment.date_enrolled = timezone.now()  # Update date_enrolled
             enrollment.save()
         
-        # Set expiry date
+        # Set expiry date using current time
+        current_time = timezone.now()
         if plan_type == CoursePlanType.ONE_MONTH:
-            enrollment.expiry_date = timezone.now() + timezone.timedelta(days=30)
+            enrollment.expiry_date = current_time + timezone.timedelta(days=30)
         elif plan_type == CoursePlanType.THREE_MONTHS:
-            enrollment.expiry_date = timezone.now() + timezone.timedelta(days=90)
+            enrollment.expiry_date = current_time + timezone.timedelta(days=90)
         elif plan_type == CoursePlanType.LIFETIME:
             enrollment.expiry_date = None
         
@@ -1707,41 +1710,3 @@ class AdminBulkEnrollmentOperationsView(generics.CreateAPIView):
             'course_id': course.id,
             'reason': reason
         }
-
-# ADD THESE SERIALIZERS TO serializers.py
-# ========================================
-
-class AdminRemoveStudentSerializer(serializers.Serializer):
-    """Serializer for admin removing student from subscription plan"""
-    user_id = serializers.IntegerField(help_text="ID of the user to remove")
-    course_id = serializers.IntegerField(help_text="ID of the course to remove from")
-    reason = serializers.CharField(
-        max_length=500, 
-        required=False, 
-        allow_blank=True,
-        help_text="Reason for removal"
-    )
-    refund_amount = serializers.DecimalField(
-        max_digits=10, 
-        decimal_places=2, 
-        required=False,
-        allow_null=True,
-        help_text="Refund amount (optional)"
-    )
-    
-    class Meta:
-        ref_name = "AdminRemoveStudentSerializer"
-
-class AdminBulkEnrollmentSerializer(serializers.Serializer):
-    """Serializer for bulk enrollment operations"""
-    operation = serializers.ChoiceField(
-        choices=['add', 'remove'],
-        help_text="Operation type: add or remove"
-    )
-    enrollments = serializers.ListField(
-        child=serializers.DictField(),
-        help_text="List of enrollment operations"
-    )
-    
-    class Meta:
-        ref_name = "AdminBulkEnrollmentSerializer"
