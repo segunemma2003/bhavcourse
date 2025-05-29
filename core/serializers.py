@@ -21,6 +21,36 @@ logger = logging.getLogger(__name__)
 User = get_user_model()
 
 
+
+class AdminAddStudentSerializer(serializers.Serializer):
+    """Serializer for admin adding student to subscription plan"""
+    user_id = serializers.IntegerField(help_text="ID of the user to enroll")
+    course_id = serializers.IntegerField(help_text="ID of the course to enroll in")
+    plan_type = serializers.ChoiceField(
+        choices=CoursePlanType.choices,
+        help_text="Subscription plan type"
+    )
+    amount_paid = serializers.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        required=False,
+        help_text="Amount paid (optional - will use course price if not provided)"
+    )
+    payment_card_id = serializers.IntegerField(
+        required=False, 
+        allow_null=True,
+        help_text="Payment card ID (optional)"
+    )
+    notes = serializers.CharField(
+        max_length=500, 
+        required=False, 
+        allow_blank=True,
+        help_text="Admin notes about this enrollment"
+    )
+    
+    class Meta:
+        ref_name = "AdminAddStudentSerializer"
+        
 class UserDetailsSerializer(serializers.ModelSerializer):
     profile_picture_url = serializers.SerializerMethodField()
     
@@ -284,12 +314,30 @@ class CourseDetailSerializer(serializers.ModelSerializer):
         ]
     
     def get_enrolled_students(self, obj):
+        """
+        OPTIMIZED: Use prefetched enrollments instead of separate query
+        """
+        # This will use the prefetched enrollments from the ViewSet
+        # instead of making a separate database query
+        if hasattr(obj, 'prefetched_objects_cache') and 'enrollments' in obj.prefetched_objects_cache:
+            return len(obj.prefetched_objects_cache['enrollments'])
+        
+        # Fallback to the original method if not prefetched
         return obj.enrollments.count()
     
     def get_is_enrolled(self, obj):
         """Check if user has an active, non-expired enrollment"""
         request = self.context.get('request')
         if request and request.user.is_authenticated:
+            # Use prefetched enrollments if available
+            if hasattr(obj, 'prefetched_objects_cache') and 'enrollments' in obj.prefetched_objects_cache:
+                enrollments = obj.prefetched_objects_cache['enrollments']
+                for enrollment in enrollments:
+                    if enrollment.user_id == request.user.id and enrollment.is_active:
+                        return not enrollment.is_expired
+                return False
+            
+            # Fallback to database query
             enrollment = obj.enrollments.filter(
                 user=request.user,
                 is_active=True
@@ -309,6 +357,22 @@ class CourseDetailSerializer(serializers.ModelSerializer):
     def get_user_enrollment(self, obj):
         request = self.context.get('request')
         if request and request.user.is_authenticated:
+            # Use prefetched enrollments if available
+            if hasattr(obj, 'prefetched_objects_cache') and 'enrollments' in obj.prefetched_objects_cache:
+                enrollments = obj.prefetched_objects_cache['enrollments']
+                for enrollment in enrollments:
+                    if enrollment.user_id == request.user.id:
+                        return {
+                            'id': enrollment.id,
+                            'plan_type': enrollment.plan_type,
+                            'plan_name': enrollment.get_plan_type_display(),
+                            'expiry_date': enrollment.expiry_date,
+                            'is_active': enrollment.is_active,
+                            'is_expired': enrollment.is_expired
+                        }
+                return None
+            
+            # Fallback to database query
             enrollment = obj.enrollments.filter(user=request.user).first()
             if enrollment:
                 return {
@@ -320,39 +384,41 @@ class CourseDetailSerializer(serializers.ModelSerializer):
                     'is_expired': enrollment.is_expired
                 }
         return None
+    
     def get_enrollment_status(self, obj):
         """Get detailed enrollment status for authenticated users"""
         request = self.context.get('request')
         if request and request.user.is_authenticated:
-            enrollment = obj.enrollments.filter(user=request.user).first()
+            # Use the optimized get_user_enrollment method
+            enrollment_data = self.get_user_enrollment(obj)
             
-            if not enrollment:
+            if not enrollment_data:
                 return {
                     'status': 'not_enrolled',
                     'message': 'User is not enrolled in this course'
                 }
             
-            if not enrollment.is_active:
+            if not enrollment_data['is_active']:
                 return {
                     'status': 'inactive',
                     'message': 'Enrollment is inactive'
                 }
             
-            if enrollment.is_expired:
+            if enrollment_data['is_expired']:
                 return {
                     'status': 'expired',
                     'message': 'Enrollment has expired',
-                    'expired_on': enrollment.expiry_date
+                    'expired_on': enrollment_data['expiry_date']
                 }
             
             # Active and not expired
             return {
                 'status': 'active',
                 'message': 'User has active access to this course',
-                'plan_type': enrollment.plan_type,
-                'plan_name': enrollment.get_plan_type_display(),
-                'expires_on': enrollment.expiry_date if enrollment.plan_type != CoursePlanType.LIFETIME else None,
-                'is_lifetime': enrollment.plan_type == CoursePlanType.LIFETIME
+                'plan_type': enrollment_data['plan_type'],
+                'plan_name': enrollment_data['plan_name'],
+                'expires_on': enrollment_data['expiry_date'] if enrollment_data['plan_type'] != CoursePlanType.LIFETIME else None,
+                'is_lifetime': enrollment_data['plan_type'] == CoursePlanType.LIFETIME
             }
         
         return {
@@ -601,6 +667,19 @@ class EnrollmentSerializer(serializers.ModelSerializer):
         fields = ['id', 'course', 'date_enrolled', 'plan_type', 'plan_name', 
                  'expiry_date', 'amount_paid', 'is_active', 'is_expired']
         read_only_fields = ['date_enrolled', 'expiry_date', 'is_expired']
+        
+    def to_representation(self, instance):
+        """
+        OPTIMIZED: This will now use the prefetched course data
+        instead of making additional database queries
+        """
+        representation = super().to_representation(instance)
+        
+        # The CourseDetailSerializer will automatically use the prefetched data
+        # from select_related() and prefetch_related() in the ViewSet
+        # No additional database queries will be triggered here
+        
+        return representation
         
 
 class PlanFeatureSerializer(serializers.ModelSerializer):

@@ -1,5 +1,5 @@
-# Add this to core/admin_views.py or include in core/views.py
 
+import hashlib
 from rest_framework import generics, viewsets, status, permissions
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
@@ -7,18 +7,25 @@ from django.db.models import Count, Sum
 from django.utils import timezone
 from datetime import timedelta, datetime
 from django.db.models.functions import TruncDate, TruncWeek, TruncMonth
-from .models import Course, User, Purchase, ContentPage, GeneralSettings
+from .models import Course, CoursePlanType, Notification, PaymentCard, PaymentOrder, User, Purchase, ContentPage, GeneralSettings
 from .serializers import (
     AdminMetricsSerializer, ContentPageSerializer, 
     GeneralSettingsSerializer, CourseListSerializer
 )
+from django.core.cache import cache
+from rest_framework import serializers
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from django.db.models import Count, Q
 from .serializers import UserDetailsSerializer
 from django.contrib.auth import get_user_model
 from .models import Enrollment
+from rest_framework.permissions import IsAdminUser
+import uuid
+from decimal import Decimal
+import logging
 
+logger = logging.getLogger(__name__)
 User = get_user_model()
 
 class AdminMetricsView(generics.GenericAPIView):
@@ -797,3 +804,767 @@ class PublicContentPageView(ContentPageMixin, generics.RetrieveAPIView):
         
         serializer = self.get_serializer(content_page)
         return Response(serializer.data)
+    
+    
+class AdminAddStudentToPlanView(generics.CreateAPIView):
+    """
+    Admin API endpoint for manually adding a student to a subscription plan without payment verification.
+    This simulates the same flow as course purchase but bypasses payment processing.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsAdminUser]
+    
+    class InputSerializer(serializers.Serializer):
+        user_id = serializers.IntegerField()
+        course_id = serializers.IntegerField()
+        plan_type = serializers.ChoiceField(choices=CoursePlanType.choices)
+        amount_paid = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
+        payment_card_id = serializers.IntegerField(required=False, allow_null=True)
+        notes = serializers.CharField(max_length=500, required=False, allow_blank=True)
+        
+        def validate_user_id(self, value):
+            try:
+                User.objects.get(pk=value)
+                return value
+            except User.DoesNotExist:
+                raise serializers.ValidationError("User does not exist")
+        
+        def validate_course_id(self, value):
+            try:
+                Course.objects.get(pk=value)
+                return value
+            except Course.DoesNotExist:
+                raise serializers.ValidationError("Course does not exist")
+        
+        def validate_payment_card_id(self, value):
+            if value is None:
+                return None
+            try:
+                PaymentCard.objects.get(pk=value)
+                return value
+            except PaymentCard.DoesNotExist:
+                raise serializers.ValidationError("Payment card does not exist")
+    
+    def get_serializer_class(self):
+        return self.InputSerializer
+    
+    @swagger_auto_schema(
+        operation_summary="Admin: Add student to subscription plan",
+        operation_description="""
+        Admin-only endpoint to manually add a student to a course subscription plan without payment verification.
+        
+        This endpoint simulates the complete purchase flow:
+        1. Creates a Purchase record with COMPLETED status
+        2. Creates/updates Enrollment for the course with selected plan
+        3. Creates a mock PaymentOrder record
+        4. Creates notifications for purchase and enrollment
+        5. All without requiring actual payment processing
+        
+        **Admin Use Cases:**
+        - Manually enroll students for promotional purposes
+        - Handle offline payments
+        - Resolve payment issues
+        - Grant free access to courses
+        """,
+        request_body=InputSerializer,
+        responses={
+            status.HTTP_201_CREATED: openapi.Response(
+                description="Student added to plan successfully",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'success': openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                        'data': openapi.Schema(
+                            type=openapi.TYPE_OBJECT,
+                            properties={
+                                'message': openapi.Schema(type=openapi.TYPE_STRING),
+                                'purchase': openapi.Schema(type=openapi.TYPE_OBJECT),
+                                'enrollment': openapi.Schema(type=openapi.TYPE_OBJECT),
+                                'payment_order_id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                'admin_action': openapi.Schema(type=openapi.TYPE_BOOLEAN)
+                            }
+                        )
+                    }
+                )
+            ),
+            status.HTTP_400_BAD_REQUEST: "Invalid request data",
+            status.HTTP_403_FORBIDDEN: "Admin access required"
+        }
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        # Extract validated data
+        user_id = serializer.validated_data['user_id']
+        course_id = serializer.validated_data['course_id']
+        plan_type = serializer.validated_data['plan_type']
+        payment_card_id = serializer.validated_data.get('payment_card_id')
+        notes = serializer.validated_data.get('notes', '')
+        
+        try:
+            # Get objects
+            user = User.objects.get(pk=user_id)
+            course = Course.objects.get(pk=course_id)
+            
+            # Get payment card if provided
+            payment_card = None
+            if payment_card_id:
+                try:
+                    payment_card = PaymentCard.objects.get(pk=payment_card_id)
+                    # Verify payment card belongs to user if provided
+                    if payment_card.user != user:
+                        return Response(
+                            {'error': 'Payment card does not belong to the specified user'},
+                            status=status.HTTP_400_BAD_REQUEST
+                        )
+                except PaymentCard.DoesNotExist:
+                    return Response(
+                        {'error': 'Payment card not found'},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
+            
+            # Calculate amount based on plan type if not provided
+            amount_paid = serializer.validated_data.get('amount_paid')
+            if not amount_paid:
+                if plan_type == CoursePlanType.ONE_MONTH:
+                    amount_paid = course.price_one_month
+                elif plan_type == CoursePlanType.THREE_MONTHS:
+                    amount_paid = course.price_three_months
+                elif plan_type == CoursePlanType.LIFETIME:
+                    amount_paid = course.price_lifetime
+                else:
+                    amount_paid = Decimal('0.00')
+            
+            with transaction.atomic():
+                result = self._process_admin_enrollment(
+                    admin_user=request.user,
+                    user=user,
+                    course=course,
+                    plan_type=plan_type,
+                    amount_paid=amount_paid,
+                    payment_card=payment_card,
+                    notes=notes
+                )
+            
+            # Clear user's enrollment cache since we added new enrollment
+            self._clear_user_cache(user.id)
+            
+            # Prepare response data
+            response_data = {
+                'message': result['message'],
+                'purchase': {
+                    'id': result['purchase'].id,
+                    'transaction_id': result['purchase'].transaction_id,
+                    'amount': result['purchase'].amount,
+                    'payment_status': result['purchase'].payment_status
+                },
+                'enrollment': {
+                    'id': result['enrollment'].id,
+                    'plan_type': result['enrollment'].plan_type,
+                    'plan_name': result['enrollment'].get_plan_type_display(),
+                    'expiry_date': result['enrollment'].expiry_date,
+                    'is_active': result['enrollment'].is_active
+                },
+                'payment_order_id': result['payment_order'].id,
+                'admin_action': True,
+                'added_by': request.user.email
+            }
+            
+            return Response({"success": True, "data": response_data}, status=status.HTTP_201_CREATED)
+            
+        except User.DoesNotExist:
+            return Response(
+                {'error': 'User not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Course.DoesNotExist:
+            return Response(
+                {'error': 'Course not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            logger.error(f"Admin enrollment failed: {str(e)}")
+            return Response(
+                {'error': 'Enrollment failed', 'details': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    def _process_admin_enrollment(self, admin_user, user, course, plan_type, amount_paid, payment_card=None, notes=''):
+        """
+        Process admin enrollment - simulates the same flow as course purchase but without payment verification
+        """
+        # Generate mock transaction ID
+        transaction_id = f"ADMIN_{uuid.uuid4().hex[:12].upper()}"
+        
+        # Generate mock Razorpay IDs
+        mock_order_id = f"order_admin_{uuid.uuid4().hex[:10]}"
+        mock_payment_id = f"pay_admin_{uuid.uuid4().hex[:10]}"
+        
+        # 1. Create or update PaymentOrder (mock)
+        payment_order, created = PaymentOrder.objects.get_or_create(
+            user=user,
+            course=course,
+            defaults={
+                'amount': amount_paid,
+                'razorpay_order_id': mock_order_id,
+                'razorpay_payment_id': mock_payment_id,
+                'razorpay_signature': f"admin_signature_{uuid.uuid4().hex[:16]}",
+                'status': 'PAID'
+            }
+        )
+        
+        if not created:
+            # Update existing order
+            payment_order.razorpay_payment_id = mock_payment_id
+            payment_order.razorpay_signature = f"admin_signature_{uuid.uuid4().hex[:16]}"
+            payment_order.status = 'PAID'
+            payment_order.save()
+        
+        # 2. Create Purchase record
+        purchase = Purchase.objects.create(
+            user=user,
+            course=course,
+            plan_type=plan_type,
+            amount=amount_paid,
+            transaction_id=transaction_id,
+            razorpay_order_id=mock_order_id,
+            razorpay_payment_id=mock_payment_id,
+            payment_status='COMPLETED',
+            payment_card=payment_card
+        )
+        
+        # 3. Create or update Enrollment
+        enrollment, enrollment_created = Enrollment.objects.get_or_create(
+            user=user,
+            course=course,
+            defaults={
+                'plan_type': plan_type,
+                'amount_paid': amount_paid,
+                'is_active': True
+            }
+        )
+        
+        if not enrollment_created:
+            # Update existing enrollment
+            enrollment.plan_type = plan_type
+            enrollment.amount_paid = amount_paid
+            enrollment.is_active = True
+            enrollment.save()
+        
+        # Calculate expiry date
+        if plan_type == CoursePlanType.ONE_MONTH:
+            enrollment.expiry_date = timezone.now() + timezone.timedelta(days=30)
+        elif plan_type == CoursePlanType.THREE_MONTHS:
+            enrollment.expiry_date = timezone.now() + timezone.timedelta(days=90)
+        elif plan_type == CoursePlanType.LIFETIME:
+            enrollment.expiry_date = None  # No expiry for lifetime
+        
+        enrollment.save()
+        
+        # 4. Create Notifications
+        # Purchase notification
+        Notification.objects.create(
+            user=user,
+            title="Course Access Granted",
+            message=f"You have been enrolled in '{course.title}' ({enrollment.get_plan_type_display()} plan) by admin.",
+            notification_type='COURSE'
+        )
+        
+        # Enrollment notification
+        Notification.objects.create(
+            user=user,
+            title="Enrollment Successful",
+            message=f"Your enrollment in '{course.title}' is now active. Enjoy learning!",
+            notification_type='COURSE'
+        )
+        
+        # Admin notification (optional)
+        admin_notes = f"Admin enrollment by {admin_user.email}. Notes: {notes}" if notes else f"Admin enrollment by {admin_user.email}"
+        Notification.objects.create(
+            user=admin_user,
+            title="Student Enrolled",
+            message=f"Successfully enrolled {user.email} in '{course.title}' ({enrollment.get_plan_type_display()}). {admin_notes}",
+            notification_type='SYSTEM'
+        )
+        
+        # 5. Send push notification (if FCM device exists)
+        try:
+            from .tasks import send_push_notification
+            send_push_notification.delay(
+                user.id,
+                "Course Access Granted",
+                f"You now have access to '{course.title}' - {enrollment.get_plan_type_display()} plan"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to send push notification: {e}")
+        
+        return {
+            'message': f"Successfully enrolled {user.email} in {course.title} ({enrollment.get_plan_type_display()})",
+            'purchase': purchase,
+            'enrollment': enrollment,
+            'payment_order': payment_order
+        }
+    
+    def _clear_user_cache(self, user_id):
+        """Clear enrollment cache for the enrolled user"""
+        try:
+            # Clear common cache patterns
+            for page in range(1, 6):  # Clear first 5 pages
+                for page_size in [10, 20, 50]:
+                    key_string = f"enrollments_{user_id}_{page}_{page_size}"
+                    cache_key = hashlib.md5(key_string.encode()).hexdigest()
+                    cache.delete(cache_key)
+        except Exception:
+            pass  # Don't break functionality if cache clearing fails
+        
+        
+class AdminRemoveStudentFromPlanView(generics.DestroyAPIView):
+    """
+    Admin API endpoint for removing a student from a course subscription plan.
+    This deactivates enrollment and updates related records.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsAdminUser]
+    
+    class InputSerializer(serializers.Serializer):
+        user_id = serializers.IntegerField()
+        course_id = serializers.IntegerField()
+        reason = serializers.CharField(max_length=500, required=False, allow_blank=True)
+        refund_amount = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
+        
+        def validate_user_id(self, value):
+            try:
+                User.objects.get(pk=value)
+                return value
+            except User.DoesNotExist:
+                raise serializers.ValidationError("User does not exist")
+        
+        def validate_course_id(self, value):
+            try:
+                Course.objects.get(pk=value)
+                return value
+            except Course.DoesNotExist:
+                raise serializers.ValidationError("Course does not exist")
+    
+    def get_serializer_class(self):
+        return self.InputSerializer
+    
+    @swagger_auto_schema(
+        operation_summary="Admin: Remove student from subscription plan",
+        operation_description="""
+        Admin-only endpoint to remove a student from a course subscription plan.
+        
+        This endpoint:
+        1. Deactivates the user's enrollment for the specified course
+        2. Updates purchase status to REFUNDED if refund_amount is provided
+        3. Creates notifications for user and admin
+        4. Logs the action for audit trail
+        5. Clears relevant caches
+        
+        **Admin Use Cases:**
+        - Handle refund requests
+        - Remove access due to policy violations
+        - Resolve billing issues
+        - Cancel enrollments upon request
+        """,
+        request_body=InputSerializer,
+        responses={
+            status.HTTP_200_OK: openapi.Response(
+                description="Student removed from plan successfully",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'success': openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                        'data': openapi.Schema(
+                            type=openapi.TYPE_OBJECT,
+                            properties={
+                                'message': openapi.Schema(type=openapi.TYPE_STRING),
+                                'enrollment_id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                'deactivated_at': openapi.Schema(type=openapi.TYPE_STRING),
+                                'refund_processed': openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                                'admin_action': openapi.Schema(type=openapi.TYPE_BOOLEAN)
+                            }
+                        )
+                    }
+                )
+            ),
+            status.HTTP_400_BAD_REQUEST: "Invalid request data",
+            status.HTTP_404_NOT_FOUND: "Enrollment not found",
+            status.HTTP_403_FORBIDDEN: "Admin access required"
+        }
+    )
+    def delete(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        # Extract validated data
+        user_id = serializer.validated_data['user_id']
+        course_id = serializer.validated_data['course_id']
+        reason = serializer.validated_data.get('reason', '')
+        refund_amount = serializer.validated_data.get('refund_amount')
+        
+        try:
+            # Get objects
+            user = User.objects.get(pk=user_id)
+            course = Course.objects.get(pk=course_id)
+            
+            # Find the enrollment
+            try:
+                enrollment = Enrollment.objects.get(user=user, course=course, is_active=True)
+            except Enrollment.DoesNotExist:
+                return Response(
+                    {'error': 'No active enrollment found for this user and course'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            with transaction.atomic():
+                result = self._process_admin_removal(
+                    admin_user=request.user,
+                    user=user,
+                    course=course,
+                    enrollment=enrollment,
+                    reason=reason,
+                    refund_amount=refund_amount
+                )
+            
+            # Clear user's enrollment cache
+            self._clear_user_cache(user.id)
+            
+            # Prepare response data
+            response_data = {
+                'message': result['message'],
+                'enrollment_id': enrollment.id,
+                'deactivated_at': timezone.now().isoformat(),
+                'refund_processed': refund_amount is not None,
+                'refund_amount': str(refund_amount) if refund_amount else None,
+                'admin_action': True,
+                'removed_by': request.user.email,
+                'reason': reason
+            }
+            
+            return Response({"success": True, "data": response_data}, status=status.HTTP_200_OK)
+            
+        except User.DoesNotExist:
+            return Response(
+                {'error': 'User not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Course.DoesNotExist:
+            return Response(
+                {'error': 'Course not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            logger.error(f"Admin removal failed: {str(e)}")
+            return Response(
+                {'error': 'Removal failed', 'details': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    def _process_admin_removal(self, admin_user, user, course, enrollment, reason='', refund_amount=None):
+        """
+        Process admin removal - deactivates enrollment and updates related records
+        """
+        # 1. Deactivate the enrollment
+        enrollment.is_active = False
+        enrollment.save()
+        
+        # 2. Update purchase records if refund is processed
+        refund_processed = False
+        if refund_amount is not None:
+            # Find related purchase records
+            purchases = Purchase.objects.filter(
+                user=user,
+                course=course,
+                payment_status='COMPLETED'
+            )
+            
+            for purchase in purchases:
+                purchase.payment_status = 'REFUNDED'
+                purchase.save()
+                refund_processed = True
+        
+        # 3. Update payment orders if they exist
+        payment_orders = PaymentOrder.objects.filter(
+            user=user,
+            course=course,
+            status='PAID'
+        )
+        
+        for payment_order in payment_orders:
+            if refund_amount is not None:
+                payment_order.status = 'REFUNDED'
+            else:
+                payment_order.status = 'CANCELLED'
+            payment_order.save()
+        
+        # 4. Create Notifications
+        # User notification
+        refund_message = f" A refund of ${refund_amount} has been processed." if refund_amount else ""
+        reason_message = f" Reason: {reason}" if reason else ""
+        
+        Notification.objects.create(
+            user=user,
+            title="Course Access Removed",
+            message=f"Your access to '{course.title}' has been removed by admin.{refund_message}{reason_message}",
+            notification_type='COURSE'
+        )
+        
+        # Admin notification
+        Notification.objects.create(
+            user=admin_user,
+            title="Student Removed from Course",
+            message=f"Successfully removed {user.email} from '{course.title}'. Refund: ${refund_amount or 'N/A'}. Reason: {reason or 'Not specified'}",
+            notification_type='SYSTEM'
+        )
+        
+        # 5. Send push notification (if FCM device exists)
+        try:
+            from .tasks import send_push_notification
+            send_push_notification.delay(
+                user.id,
+                "Course Access Removed",
+                f"Your access to '{course.title}' has been removed.{refund_message}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to send push notification: {e}")
+        
+        return {
+            'message': f"Successfully removed {user.email} from {course.title}",
+            'refund_processed': refund_processed
+        }
+    
+    def _clear_user_cache(self, user_id):
+        """Clear enrollment cache for the user"""
+        try:
+            # Clear common cache patterns
+            for page in range(1, 6):  # Clear first 5 pages
+                for page_size in [10, 20, 50]:
+                    key_string = f"enrollments_{user_id}_{page}_{page_size}"
+                    cache_key = hashlib.md5(key_string.encode()).hexdigest()
+                    cache.delete(cache_key)
+        except Exception:
+            pass  # Don't break functionality if cache clearing fails
+
+# ADD BULK OPERATIONS API
+# =======================
+
+class AdminBulkEnrollmentOperationsView(generics.CreateAPIView):
+    """
+    Admin API for bulk enrollment operations (add/remove multiple students)
+    """
+    permission_classes = [permissions.IsAuthenticated, IsAdminUser]
+    
+    class InputSerializer(serializers.Serializer):
+        operation = serializers.ChoiceField(choices=['add', 'remove'])
+        enrollments = serializers.ListField(
+            child=serializers.DictField(),
+            min_length=1,
+            max_length=100  # Limit to prevent abuse
+        )
+        
+        def validate_enrollments(self, value):
+            """Validate each enrollment entry"""
+            for enrollment in value:
+                if 'user_id' not in enrollment or 'course_id' not in enrollment:
+                    raise serializers.ValidationError("Each enrollment must have user_id and course_id")
+                
+                # For add operations, plan_type is required
+                if self.initial_data.get('operation') == 'add' and 'plan_type' not in enrollment:
+                    raise serializers.ValidationError("plan_type is required for add operations")
+            
+            return value
+    
+    def get_serializer_class(self):
+        return self.InputSerializer
+    
+    @swagger_auto_schema(
+        operation_summary="Admin: Bulk enrollment operations",
+        operation_description="""
+        Admin-only endpoint for bulk enrollment operations.
+        
+        **Add Operation:**
+        - Adds multiple students to courses
+        - Each entry needs: user_id, course_id, plan_type
+        - Optional: amount_paid, notes
+        
+        **Remove Operation:**
+        - Removes multiple students from courses
+        - Each entry needs: user_id, course_id
+        - Optional: reason, refund_amount
+        """,
+        request_body=InputSerializer,
+        responses={
+            status.HTTP_200_OK: openapi.Response(
+                description="Bulk operation completed",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'success': openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                        'data': openapi.Schema(
+                            type=openapi.TYPE_OBJECT,
+                            properties={
+                                'total_processed': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                'successful': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                'failed': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                'results': openapi.Schema(type=openapi.TYPE_ARRAY)
+                            }
+                        )
+                    }
+                )
+            )
+        }
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        operation = serializer.validated_data['operation']
+        enrollments = serializer.validated_data['enrollments']
+        
+        results = []
+        successful = 0
+        failed = 0
+        
+        for idx, enrollment_data in enumerate(enrollments):
+            try:
+                if operation == 'add':
+                    result = self._bulk_add_student(request.user, enrollment_data)
+                else:  # remove
+                    result = self._bulk_remove_student(request.user, enrollment_data)
+                
+                results.append({
+                    'index': idx,
+                    'status': 'success',
+                    'message': result['message'],
+                    'data': result
+                })
+                successful += 1
+                
+            except Exception as e:
+                results.append({
+                    'index': idx,
+                    'status': 'error',
+                    'message': str(e),
+                    'data': enrollment_data
+                })
+                failed += 1
+        
+        return Response({
+            "success": True,
+            "data": {
+                'operation': operation,
+                'total_processed': len(enrollments),
+                'successful': successful,
+                'failed': failed,
+                'results': results
+            }
+        }, status=status.HTTP_200_OK)
+    
+    def _bulk_add_student(self, admin_user, data):
+        """Add single student in bulk operation"""
+        user = User.objects.get(pk=data['user_id'])
+        course = Course.objects.get(pk=data['course_id'])
+        plan_type = data['plan_type']
+        amount_paid = data.get('amount_paid')
+        notes = data.get('notes', '')
+        
+        # Use the same logic as AdminAddStudentToPlanView
+        if not amount_paid:
+            if plan_type == CoursePlanType.ONE_MONTH:
+                amount_paid = course.price_one_month
+            elif plan_type == CoursePlanType.THREE_MONTHS:
+                amount_paid = course.price_three_months
+            elif plan_type == CoursePlanType.LIFETIME:
+                amount_paid = course.price_lifetime
+            else:
+                amount_paid = Decimal('0.00')
+        
+        # Process enrollment (simplified version)
+        enrollment, created = Enrollment.objects.get_or_create(
+            user=user,
+            course=course,
+            defaults={
+                'plan_type': plan_type,
+                'amount_paid': amount_paid,
+                'is_active': True
+            }
+        )
+        
+        if not created:
+            enrollment.plan_type = plan_type
+            enrollment.amount_paid = amount_paid
+            enrollment.is_active = True
+            enrollment.save()
+        
+        # Set expiry date
+        if plan_type == CoursePlanType.ONE_MONTH:
+            enrollment.expiry_date = timezone.now() + timezone.timedelta(days=30)
+        elif plan_type == CoursePlanType.THREE_MONTHS:
+            enrollment.expiry_date = timezone.now() + timezone.timedelta(days=90)
+        elif plan_type == CoursePlanType.LIFETIME:
+            enrollment.expiry_date = None
+        
+        enrollment.save()
+        
+        return {
+            'message': f"Added {user.email} to {course.title}",
+            'enrollment_id': enrollment.id,
+            'user_id': user.id,
+            'course_id': course.id
+        }
+    
+    def _bulk_remove_student(self, admin_user, data):
+        """Remove single student in bulk operation"""
+        user = User.objects.get(pk=data['user_id'])
+        course = Course.objects.get(pk=data['course_id'])
+        reason = data.get('reason', '')
+        
+        enrollment = Enrollment.objects.get(user=user, course=course, is_active=True)
+        enrollment.is_active = False
+        enrollment.save()
+        
+        return {
+            'message': f"Removed {user.email} from {course.title}",
+            'enrollment_id': enrollment.id,
+            'user_id': user.id,
+            'course_id': course.id,
+            'reason': reason
+        }
+
+# ADD THESE SERIALIZERS TO serializers.py
+# ========================================
+
+class AdminRemoveStudentSerializer(serializers.Serializer):
+    """Serializer for admin removing student from subscription plan"""
+    user_id = serializers.IntegerField(help_text="ID of the user to remove")
+    course_id = serializers.IntegerField(help_text="ID of the course to remove from")
+    reason = serializers.CharField(
+        max_length=500, 
+        required=False, 
+        allow_blank=True,
+        help_text="Reason for removal"
+    )
+    refund_amount = serializers.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        required=False,
+        allow_null=True,
+        help_text="Refund amount (optional)"
+    )
+    
+    class Meta:
+        ref_name = "AdminRemoveStudentSerializer"
+
+class AdminBulkEnrollmentSerializer(serializers.Serializer):
+    """Serializer for bulk enrollment operations"""
+    operation = serializers.ChoiceField(
+        choices=['add', 'remove'],
+        help_text="Operation type: add or remove"
+    )
+    enrollments = serializers.ListField(
+        child=serializers.DictField(),
+        help_text="List of enrollment operations"
+    )
+    
+    class Meta:
+        ref_name = "AdminBulkEnrollmentSerializer"
