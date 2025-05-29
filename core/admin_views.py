@@ -821,6 +821,9 @@ class AdminAddStudentToPlanView(generics.CreateAPIView):
         payment_card_id = serializers.IntegerField(required=False, allow_null=True)
         notes = serializers.CharField(max_length=500, required=False, allow_blank=True)
         
+        class Meta:
+            ref_name = "AdminAddStudentInputSerializer"
+        
         def validate_user_id(self, value):
             try:
                 User.objects.get(pk=value)
@@ -869,6 +872,30 @@ class AdminAddStudentToPlanView(generics.CreateAPIView):
         responses={
             status.HTTP_201_CREATED: openapi.Response(
                 description="Student added to plan successfully",
+                examples={
+                    "application/json": {
+                        "success": True,
+                        "data": {
+                            "message": "Successfully enrolled user@example.com in Course Title (Lifetime)",
+                            "purchase": {
+                                "id": 123,
+                                "transaction_id": "ADMIN_A1B2C3D4E5F6",
+                                "amount": "299.00",
+                                "payment_status": "COMPLETED"
+                            },
+                            "enrollment": {
+                                "id": 456,
+                                "plan_type": "LIFETIME",
+                                "plan_name": "Lifetime",
+                                "expiry_date": None,
+                                "is_active": True
+                            },
+                            "payment_order_id": 789,
+                            "admin_action": True,
+                            "added_by": "admin@example.com"
+                        }
+                    }
+                },
                 schema=openapi.Schema(
                     type=openapi.TYPE_OBJECT,
                     properties={
@@ -877,17 +904,50 @@ class AdminAddStudentToPlanView(generics.CreateAPIView):
                             type=openapi.TYPE_OBJECT,
                             properties={
                                 'message': openapi.Schema(type=openapi.TYPE_STRING),
-                                'purchase': openapi.Schema(type=openapi.TYPE_OBJECT),
-                                'enrollment': openapi.Schema(type=openapi.TYPE_OBJECT),
+                                'purchase': openapi.Schema(
+                                    type=openapi.TYPE_OBJECT,
+                                    properties={
+                                        'id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                        'transaction_id': openapi.Schema(type=openapi.TYPE_STRING),
+                                        'amount': openapi.Schema(type=openapi.TYPE_STRING),
+                                        'payment_status': openapi.Schema(type=openapi.TYPE_STRING)
+                                    }
+                                ),
+                                'enrollment': openapi.Schema(
+                                    type=openapi.TYPE_OBJECT,
+                                    properties={
+                                        'id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                        'plan_type': openapi.Schema(type=openapi.TYPE_STRING),
+                                        'plan_name': openapi.Schema(type=openapi.TYPE_STRING),
+                                        'expiry_date': openapi.Schema(type=openapi.TYPE_STRING, format='date-time'),
+                                        'is_active': openapi.Schema(type=openapi.TYPE_BOOLEAN)
+                                    }
+                                ),
                                 'payment_order_id': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                'admin_action': openapi.Schema(type=openapi.TYPE_BOOLEAN)
+                                'admin_action': openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                                'added_by': openapi.Schema(type=openapi.TYPE_STRING)
                             }
                         )
                     }
                 )
             ),
-            status.HTTP_400_BAD_REQUEST: "Invalid request data",
-            status.HTTP_403_FORBIDDEN: "Admin access required"
+            status.HTTP_400_BAD_REQUEST: openapi.Response(
+                description="Invalid request data",
+                examples={
+                    "application/json": {
+                        "error": "Invalid request data",
+                        "details": "User does not exist"
+                    }
+                }
+            ),
+            status.HTTP_403_FORBIDDEN: openapi.Response(
+                description="Admin access required",
+                examples={
+                    "application/json": {
+                        "detail": "You do not have permission to perform this action."
+                    }
+                }
+            )
         }
     )
     def post(self, request, *args, **kwargs):
@@ -1115,8 +1175,7 @@ class AdminAddStudentToPlanView(generics.CreateAPIView):
                     cache_key = hashlib.md5(key_string.encode()).hexdigest()
                     cache.delete(cache_key)
         except Exception:
-            pass  # Don't break functionality if cache clearing fails
-        
+            pass
         
 class AdminRemoveStudentFromPlanView(generics.DestroyAPIView):
     """
@@ -1130,6 +1189,9 @@ class AdminRemoveStudentFromPlanView(generics.DestroyAPIView):
         course_id = serializers.IntegerField()
         reason = serializers.CharField(max_length=500, required=False, allow_blank=True)
         refund_amount = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
+        
+        class Meta:
+            ref_name = "AdminRemoveStudentInputSerializer"
         
         def validate_user_id(self, value):
             try:
@@ -1170,6 +1232,21 @@ class AdminRemoveStudentFromPlanView(generics.DestroyAPIView):
         responses={
             status.HTTP_200_OK: openapi.Response(
                 description="Student removed from plan successfully",
+                examples={
+                    "application/json": {
+                        "success": True,
+                        "data": {
+                            "message": "Successfully removed user@example.com from Course Title",
+                            "enrollment_id": 456,
+                            "deactivated_at": "2025-01-20T10:30:00Z",
+                            "refund_processed": True,
+                            "refund_amount": "99.00",
+                            "admin_action": True,
+                            "removed_by": "admin@example.com",
+                            "reason": "User requested refund"
+                        }
+                    }
+                },
                 schema=openapi.Schema(
                     type=openapi.TYPE_OBJECT,
                     properties={
@@ -1181,15 +1258,40 @@ class AdminRemoveStudentFromPlanView(generics.DestroyAPIView):
                                 'enrollment_id': openapi.Schema(type=openapi.TYPE_INTEGER),
                                 'deactivated_at': openapi.Schema(type=openapi.TYPE_STRING),
                                 'refund_processed': openapi.Schema(type=openapi.TYPE_BOOLEAN),
-                                'admin_action': openapi.Schema(type=openapi.TYPE_BOOLEAN)
+                                'refund_amount': openapi.Schema(type=openapi.TYPE_STRING),
+                                'admin_action': openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                                'removed_by': openapi.Schema(type=openapi.TYPE_STRING),
+                                'reason': openapi.Schema(type=openapi.TYPE_STRING)
                             }
                         )
                     }
                 )
             ),
-            status.HTTP_400_BAD_REQUEST: "Invalid request data",
-            status.HTTP_404_NOT_FOUND: "Enrollment not found",
-            status.HTTP_403_FORBIDDEN: "Admin access required"
+            status.HTTP_400_BAD_REQUEST: openapi.Response(
+                description="Invalid request data",
+                examples={
+                    "application/json": {
+                        "error": "Invalid request data",
+                        "details": "User does not exist"
+                    }
+                }
+            ),
+            status.HTTP_404_NOT_FOUND: openapi.Response(
+                description="Enrollment not found",
+                examples={
+                    "application/json": {
+                        "error": "No active enrollment found for this user and course"
+                    }
+                }
+            ),
+            status.HTTP_403_FORBIDDEN: openapi.Response(
+                description="Admin access required",
+                examples={
+                    "application/json": {
+                        "detail": "You do not have permission to perform this action."
+                    }
+                }
+            )
         }
     )
     def delete(self, request, *args, **kwargs):
@@ -1362,6 +1464,9 @@ class AdminBulkEnrollmentOperationsView(generics.CreateAPIView):
             max_length=100  # Limit to prevent abuse
         )
         
+        class Meta:
+            ref_name = "AdminBulkEnrollmentInputSerializer"
+        
         def validate_enrollments(self, value):
             """Validate each enrollment entry"""
             for enrollment in value:
@@ -1396,6 +1501,48 @@ class AdminBulkEnrollmentOperationsView(generics.CreateAPIView):
         responses={
             status.HTTP_200_OK: openapi.Response(
                 description="Bulk operation completed",
+                examples={
+                    "application/json": {
+                        "success": True,
+                        "data": {
+                            "operation": "add",
+                            "total_processed": 3,
+                            "successful": 2,
+                            "failed": 1,
+                            "results": [
+                                {
+                                    "index": 0,
+                                    "status": "success",
+                                    "message": "Added user1@example.com to Course Title",
+                                    "data": {
+                                        "enrollment_id": 123,
+                                        "user_id": 1,
+                                        "course_id": 10
+                                    }
+                                },
+                                {
+                                    "index": 1,
+                                    "status": "success", 
+                                    "message": "Added user2@example.com to Course Title",
+                                    "data": {
+                                        "enrollment_id": 124,
+                                        "user_id": 2,
+                                        "course_id": 10
+                                    }
+                                },
+                                {
+                                    "index": 2,
+                                    "status": "error",
+                                    "message": "User does not exist",
+                                    "data": {
+                                        "user_id": 999,
+                                        "course_id": 10
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                },
                 schema=openapi.Schema(
                     type=openapi.TYPE_OBJECT,
                     properties={
@@ -1403,25 +1550,43 @@ class AdminBulkEnrollmentOperationsView(generics.CreateAPIView):
                         'data': openapi.Schema(
                             type=openapi.TYPE_OBJECT,
                             properties={
+                                'operation': openapi.Schema(type=openapi.TYPE_STRING),
                                 'total_processed': openapi.Schema(type=openapi.TYPE_INTEGER),
                                 'successful': openapi.Schema(type=openapi.TYPE_INTEGER),
                                 'failed': openapi.Schema(type=openapi.TYPE_INTEGER),
-                               'results': openapi.Schema(
-                                        type=openapi.TYPE_ARRAY,
-                                        items=openapi.Schema(
-                                            type=openapi.TYPE_OBJECT,
-                                            properties={
-                                                'index': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                                'status': openapi.Schema(type=openapi.TYPE_STRING),
-                                                'message': openapi.Schema(type=openapi.TYPE_STRING),
-                                                'data': openapi.Schema(type=openapi.TYPE_OBJECT)
-                                            }
-                                        )
+                                'results': openapi.Schema(
+                                    type=openapi.TYPE_ARRAY,
+                                    items=openapi.Schema(
+                                        type=openapi.TYPE_OBJECT,
+                                        properties={
+                                            'index': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                            'status': openapi.Schema(type=openapi.TYPE_STRING),
+                                            'message': openapi.Schema(type=openapi.TYPE_STRING),
+                                            'data': openapi.Schema(type=openapi.TYPE_OBJECT)
+                                        }
                                     )
+                                )
                             }
                         )
                     }
                 )
+            ),
+            status.HTTP_400_BAD_REQUEST: openapi.Response(
+                description="Invalid request data",
+                examples={
+                    "application/json": {
+                        "error": "Invalid operation type",
+                        "details": "Operation must be 'add' or 'remove'"
+                    }
+                }
+            ),
+            status.HTTP_403_FORBIDDEN: openapi.Response(
+                description="Admin access required",
+                examples={
+                    "application/json": {
+                        "detail": "You do not have permission to perform this action."
+                    }
+                }
             )
         }
     )
