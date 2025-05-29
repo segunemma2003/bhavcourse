@@ -1176,8 +1176,7 @@ class AdminAddStudentToPlanView(generics.CreateAPIView):
                     cache_key = hashlib.md5(key_string.encode()).hexdigest()
                     cache.delete(cache_key)
         except Exception:
-            pass  # Don't break functionality if cache clearing fai
-        
+            pass
 class AdminRemoveStudentFromPlanView(generics.DestroyAPIView):
     """
     Admin API endpoint for removing a student from a course subscription plan.
