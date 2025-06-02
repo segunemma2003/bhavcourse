@@ -147,7 +147,7 @@ class CourseViewSet(viewsets.ModelViewSet):
             return CourseCreateUpdateSerializer
         elif self.action == 'retrieve':
             return CourseDetailSerializer
-        return CourseListSerializer
+        return CourseListSerializer  # Use CourseListSerializer for list view too
     
     def get_permissions(self):
         """
@@ -162,9 +162,40 @@ class CourseViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         """
         Optionally restricts the returned courses by filtering against query parameters.
+        OPTIMIZED: Includes prefetch_related for related objects to reduce database queries.
         """
-        queryset = Course.objects.all()
+        # Base queryset with optimized joins
+        queryset = Course.objects.select_related(
+            'category'  # Join category table
+        ).prefetch_related(
+            # Prefetch objectives
+            models.Prefetch(
+                'objectives',
+                queryset=CourseObjective.objects.all()
+            ),
+            # Prefetch requirements
+            models.Prefetch(
+                'requirements', 
+                queryset=CourseRequirement.objects.all()
+            ),
+            # Prefetch curriculum ordered by order field
+            models.Prefetch(
+                'curriculum',
+                queryset=CourseCurriculum.objects.order_by('order')
+            ),
+            # Prefetch enrollments for enrollment checking
+            models.Prefetch(
+                'enrollments',
+                queryset=Enrollment.objects.select_related('user')
+            ),
+            # Prefetch wishlist entries
+            models.Prefetch(
+                'wishlisted_by',
+                queryset=Wishlist.objects.select_related('user')
+            )
+        )
         
+        # Apply filters
         # Filter by category
         category_id = self.request.query_params.get('category')
         if category_id:
@@ -178,7 +209,9 @@ class CourseViewSet(viewsets.ModelViewSet):
         # Search by title or description
         search = self.request.query_params.get('search')
         if search:
-            queryset = queryset.filter(title__icontains=search) | queryset.filter(small_desc__icontains=search)
+            queryset = queryset.filter(
+                Q(title__icontains=search) | Q(small_desc__icontains=search)
+            )
         
         # Filter by location
         location = self.request.query_params.get('location')
@@ -189,7 +222,7 @@ class CourseViewSet(viewsets.ModelViewSet):
     
     @swagger_auto_schema(
         operation_summary="List all courses",
-        operation_description="Returns a list of all courses with basic information",
+        operation_description="Returns a list of all courses with complete information including enrollment status",
         manual_parameters=[
             openapi.Parameter('category', openapi.IN_QUERY, description="Filter by category ID", type=openapi.TYPE_INTEGER),
             openapi.Parameter('featured', openapi.IN_QUERY, description="Filter featured courses (true/false)", type=openapi.TYPE_BOOLEAN),
@@ -201,6 +234,10 @@ class CourseViewSet(viewsets.ModelViewSet):
         }
     )
     def list(self, request, *args, **kwargs):
+        """
+        List all courses with complete information including enrollment status.
+        Uses CourseListSerializer which now includes all the detailed information.
+        """
         return super().list(request, *args, **kwargs)
     
     @swagger_auto_schema(
@@ -213,6 +250,7 @@ class CourseViewSet(viewsets.ModelViewSet):
     )
     def retrieve(self, request, *args, **kwargs):
         return super().retrieve(request, *args, **kwargs)
+    
     
     @swagger_auto_schema(
         operation_summary="Create a new course",

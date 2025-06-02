@@ -1,5 +1,4 @@
 from django.db import models
-
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.utils import timezone
 import random
@@ -37,6 +36,8 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
     date_joined = models.DateTimeField(auto_now_add=True)
+    
+    # Remove duplicate profile_picture field - you had it twice
     profile_picture = models.ImageField(
         upload_to='profile_pictures/', 
         blank=True, 
@@ -49,14 +50,6 @@ class User(AbstractBaseUser, PermissionsMixin):
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['full_name', 'phone_number']
     
-    
-    profile_picture = models.ImageField(
-        upload_to='profile_pictures/', 
-        blank=True, 
-        null=True,
-        help_text="User's profile picture"
-    )
-    
     def generate_otp(self):
         otp = ''.join(random.choices(string.digits, k=4))
         self.otp = otp
@@ -65,12 +58,9 @@ class User(AbstractBaseUser, PermissionsMixin):
         return otp
     
     def clear_otp(self):
-        """
-        Clear OTP after successful password reset
-        """
+        """Clear OTP after successful password reset"""
         self.otp = None
         self.otp_expiry = None
-        self.otp_verified = False
         self.save()
     
     def get_profile_picture_url(self):
@@ -114,6 +104,12 @@ class Category(models.Model):
     class Meta:
         verbose_name_plural = "Categories"
 
+# Move CoursePlanType to the top so it can be referenced by other models
+class CoursePlanType(models.TextChoices):
+    ONE_MONTH = 'ONE_MONTH', 'One Month'
+    THREE_MONTHS = 'THREE_MONTHS', 'Three Months'
+    LIFETIME = 'LIFETIME', 'Lifetime'
+
 class CourseObjective(models.Model):
     description = models.CharField(max_length=255)
     course = models.ForeignKey('Course', related_name='objectives', on_delete=models.CASCADE)
@@ -144,7 +140,7 @@ class Course(models.Model):
     title = models.CharField(max_length=200)
     image = models.ImageField(upload_to='courses/')
     description = models.TextField(default="description")
-    small_desc = models.CharField(max_length=255,default="description")
+    small_desc = models.CharField(max_length=255, default="description")
     category = models.ForeignKey(Category, related_name='courses', on_delete=models.CASCADE)
     is_featured = models.BooleanField(default=False)
     date_uploaded = models.DateTimeField(auto_now_add=True)
@@ -158,47 +154,70 @@ class Course(models.Model):
     
     @property
     def enrolled_students(self):
-        return self.enrollments.count()
+        """Get count of active enrollments"""
+        return self.enrollments.filter(is_active=True).count()
     
-    @property
-    def is_expired(self):
-        if self.plan_type == CoursePlanType.LIFETIME:
-            return False
-        return timezone.now() >= self.expiry_date if self.expiry_date else False
+    # Remove the is_expired property from Course model - it doesn't make sense here
+    # as expiry is an enrollment property, not a course property
     
-class CoursePlanType(models.TextChoices):
-    ONE_MONTH = 'ONE_MONTH', 'One Month'
-    THREE_MONTHS = 'THREE_MONTHS', 'Three Months'
-    LIFETIME = 'LIFETIME', 'Lifetime'
-    
-    
+    class Meta:
+        ordering = ['-date_uploaded']
+        indexes = [
+            models.Index(fields=['is_featured']),
+            models.Index(fields=['category']),
+            models.Index(fields=['date_uploaded']),
+        ]
 
 class Enrollment(models.Model):
     user = models.ForeignKey(User, related_name='enrollments', on_delete=models.CASCADE)
     course = models.ForeignKey(Course, related_name='enrollments', on_delete=models.CASCADE)
     date_enrolled = models.DateTimeField(auto_now_add=True)
-    plan_type = models.CharField(max_length=20, choices=CoursePlanType.choices, default=CoursePlanType.ONE_MONTH)
+    plan_type = models.CharField(
+        max_length=20, 
+        choices=CoursePlanType.choices, 
+        default=CoursePlanType.ONE_MONTH
+    )
     expiry_date = models.DateTimeField(null=True, blank=True)  # Null for lifetime plan
     amount_paid = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     is_active = models.BooleanField(default=True)
     
     class Meta:
         unique_together = ['user', 'course']
+        ordering = ['-date_enrolled']
+        indexes = [
+            models.Index(fields=['user', 'course', 'is_active']),
+            models.Index(fields=['expiry_date']),
+            models.Index(fields=['plan_type']),
+        ]
     
     def __str__(self):
         return f"{self.user.email} - {self.course.title} - {self.get_plan_type_display()}"
     
     @property
     def is_expired(self):
+        """
+        Check if enrollment has expired.
+        Lifetime enrollments never expire.
+        """
+        # Lifetime plans never expire
         if self.plan_type == CoursePlanType.LIFETIME:
             return False
-        return timezone.now() >= self.expiry_date if self.expiry_date else False
+        
+        # If no expiry date is set, consider it not expired
+        if not self.expiry_date:
+            return False
+        
+        # Check if current time is past expiry date
+        return timezone.now() > self.expiry_date
     
     def save(self, *args, **kwargs):
-        # Calculate expiry date if not a lifetime plan
+        """
+        Override save to set expiry_date based on plan_type if not already set.
+        """
+        # Set expiry date if not already set and not lifetime plan
         if not self.expiry_date and self.plan_type != CoursePlanType.LIFETIME:
-            # Use current time if date_enrolled is None
-            base_date = self.date_enrolled or timezone.now()
+            # Use current time as base date for new enrollments
+            base_date = timezone.now()
             
             if self.plan_type == CoursePlanType.ONE_MONTH:
                 self.expiry_date = base_date + timezone.timedelta(days=30)
@@ -207,6 +226,45 @@ class Enrollment(models.Model):
         
         super().save(*args, **kwargs)
     
+    def get_days_remaining(self):
+        """
+        Get number of days remaining until expiry.
+        Returns None for lifetime plans.
+        Returns 0 if already expired.
+        """
+        if self.plan_type == CoursePlanType.LIFETIME:
+            return None
+        
+        if not self.expiry_date:
+            return None
+        
+        if self.is_expired:
+            return 0
+        
+        delta = self.expiry_date - timezone.now()
+        return max(0, delta.days)
+    
+    def extend_enrollment(self, additional_days):
+        """Extend the enrollment by additional days."""
+        if self.plan_type == CoursePlanType.LIFETIME:
+            return  # Cannot extend lifetime plans
+        
+        if not self.expiry_date:
+            self.expiry_date = timezone.now()
+        
+        self.expiry_date += timezone.timedelta(days=additional_days)
+        self.save()
+    
+    def deactivate(self):
+        """Deactivate the enrollment."""
+        self.is_active = False
+        self.save()
+    
+    def reactivate(self):
+        """Reactivate the enrollment."""
+        self.is_active = True
+        self.save()
+
 class PlanFeature(models.Model):
     description = models.CharField(max_length=255)
     plan = models.ForeignKey('SubscriptionPlan', related_name='features', on_delete=models.CASCADE)
@@ -240,6 +298,12 @@ class UserSubscription(models.Model):
     @property
     def is_expired(self):
         return timezone.now() >= self.end_date
+    
+    class Meta:
+        indexes = [
+            models.Index(fields=['user', 'is_active']),
+            models.Index(fields=['end_date']),
+        ]
 
 class Wishlist(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='wishlist_items', on_delete=models.CASCADE)
@@ -248,6 +312,10 @@ class Wishlist(models.Model):
     
     class Meta:
         unique_together = ['user', 'course']
+        indexes = [
+            models.Index(fields=['user']),
+            models.Index(fields=['course']),
+        ]
     
     def __str__(self):
         return f"{self.user.email} - {self.course.title}"
@@ -270,13 +338,18 @@ class PaymentCard(models.Model):
     
     def __str__(self):
         return f"{self.card_type} **** **** **** {self.last_four}"
+    
+    class Meta:
+        indexes = [
+            models.Index(fields=['user', 'is_default']),
+        ]
 
 class Purchase(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='purchases', on_delete=models.SET_NULL, null=True, blank=True)
     course = models.ForeignKey(Course, related_name='purchases', on_delete=models.SET_NULL, null=True, blank=True)
     payment_card = models.ForeignKey(PaymentCard, related_name='purchases', on_delete=models.SET_NULL, null=True, blank=True)
     
-    # Add plan_type field instead of the plan field
+    # Plan type field for course purchases
     plan_type = models.CharField(max_length=20, choices=CoursePlanType.choices, null=True, blank=True)
     
     amount = models.DecimalField(max_digits=10, decimal_places=2)
@@ -296,6 +369,14 @@ class Purchase(models.Model):
     def __str__(self):
         course_title = self.course.title if self.course else "Unknown Course"
         return f"{self.user.email if self.user else 'Unknown User'} - {course_title}"
+    
+    class Meta:
+        ordering = ['-purchase_date']
+        indexes = [
+            models.Index(fields=['user', 'payment_status']),
+            models.Index(fields=['purchase_date']),
+            models.Index(fields=['transaction_id']),
+        ]
 
 class Notification(models.Model):
     NOTIFICATION_TYPES = (
@@ -317,10 +398,14 @@ class Notification(models.Model):
     
     class Meta:
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'is_seen']),
+            models.Index(fields=['created_at']),
+        ]
         
 class FCMDevice(models.Model):
     user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,  # Use this instead of direct User reference
+        settings.AUTH_USER_MODEL,
         related_name='fcm_devices', 
         on_delete=models.CASCADE
     )
@@ -331,6 +416,12 @@ class FCMDevice(models.Model):
     
     def __str__(self):
         return f"{self.user.email} - {self.device_id}"
+    
+    class Meta:
+        indexes = [
+            models.Index(fields=['user', 'active']),
+            models.Index(fields=['device_id']),
+        ]
     
 class ContentPage(models.Model):
     PAGE_TYPES = (
@@ -374,8 +465,8 @@ class GeneralSettings(models.Model):
         return settings
     
 class PaymentOrder(models.Model):
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='payment_orders',on_delete=models.SET_NULL, null=True, blank=True)
-    course = models.ForeignKey(Course, related_name='payment_orders',on_delete=models.SET_NULL, null=True, blank=True)  # Made required
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='payment_orders', on_delete=models.SET_NULL, null=True, blank=True)
+    course = models.ForeignKey(Course, related_name='payment_orders', on_delete=models.SET_NULL, null=True, blank=True)
     plan = models.ForeignKey('SubscriptionPlan', related_name='payment_orders', on_delete=models.SET_NULL, null=True, blank=True)
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     razorpay_order_id = models.CharField(max_length=100, unique=True)
@@ -394,3 +485,11 @@ class PaymentOrder(models.Model):
     
     def __str__(self):
         return f"{self.user.email} - {self.razorpay_order_id}"
+    
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'status']),
+            models.Index(fields=['razorpay_order_id']),
+            models.Index(fields=['created_at']),
+        ]

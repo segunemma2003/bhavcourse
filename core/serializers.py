@@ -303,40 +303,148 @@ class CourseCurriculumSerializer(serializers.ModelSerializer):
 
 class CourseListSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source='category.name', read_only=True)
-    enrolled_students = serializers.IntegerField(read_only=True)
+    enrolled_students = serializers.SerializerMethodField()
     is_enrolled = serializers.SerializerMethodField()
     is_wishlisted = serializers.SerializerMethodField()
+    user_enrollment = serializers.SerializerMethodField()
+    enrollment_status = serializers.SerializerMethodField()
+    # Add detailed course information like in CourseDetailSerializer
+    objectives = CourseObjectiveSerializer(many=True, read_only=True)
+    requirements = CourseRequirementSerializer(many=True, read_only=True)
+    curriculum = CourseCurriculumSerializer(many=True, read_only=True)
     
     class Meta:
         model = Course
         fields = [
-            'id', 'title', 'image', 'small_desc','description', 'category', 
+            'id', 'title', 'image', 'small_desc', 'description', 'category', 
             'category_name', 'is_featured', 'date_uploaded', 
-            'location', 'enrolled_students', 'is_enrolled', 'is_wishlisted'
+            'location', 'enrolled_students', 'is_enrolled', 'is_wishlisted',
+            'price_one_month', 'price_three_months', 'price_lifetime',
+            'objectives', 'requirements', 'curriculum', 
+            'user_enrollment', 'enrollment_status'
         ]
     
+    def get_enrolled_students(self, obj):
+        """Get total number of enrolled students"""
+        return obj.enrollments.filter(is_active=True).count()
+    
     def get_is_enrolled(self, obj):
+        """Check if user has an active, non-expired enrollment"""
         request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            return obj.enrollments.filter(user=request.user).exists()
-        return False
+        if not request or not request.user.is_authenticated:
+            return False
+            
+        try:
+            # Get the user's enrollment for this course
+            enrollment = obj.enrollments.filter(
+                user=request.user,
+                is_active=True
+            ).first()
+            
+            if not enrollment:
+                return False
+                
+            # Check if enrollment is expired
+            if enrollment.is_expired:
+                return False
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error checking enrollment status: {str(e)}")
+            return False
     
     def get_is_wishlisted(self, obj):
+        """Check if course is in user's wishlist"""
         request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            return obj.wishlisted_by.filter(user=request.user).exists()
-        return False
+        if not request or not request.user.is_authenticated:
+            return False
+            
+        return obj.wishlisted_by.filter(user=request.user).exists()
+    
+    def get_user_enrollment(self, obj):
+        """Get user's enrollment details if enrolled"""
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return None
+            
+        try:
+            enrollment = obj.enrollments.filter(user=request.user).first()
+            if not enrollment:
+                return None
+                
+            return {
+                'id': enrollment.id,
+                'plan_type': enrollment.plan_type,
+                'plan_name': enrollment.get_plan_type_display(),
+                'expiry_date': enrollment.expiry_date,
+                'date_enrolled': enrollment.date_enrolled,
+                'amount_paid': enrollment.amount_paid,
+                'is_active': enrollment.is_active,
+                'is_expired': enrollment.is_expired
+            }
+        except Exception as e:
+            logger.error(f"Error getting user enrollment: {str(e)}")
+            return None
+    
+    def get_enrollment_status(self, obj):
+        """Get detailed enrollment status for authenticated users"""
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return {
+                'status': 'unauthenticated',
+                'message': 'User not authenticated'
+            }
+        
+        try:
+            enrollment = obj.enrollments.filter(user=request.user).first()
+            
+            if not enrollment:
+                return {
+                    'status': 'not_enrolled',
+                    'message': 'User is not enrolled in this course'
+                }
+            
+            if not enrollment.is_active:
+                return {
+                    'status': 'inactive',
+                    'message': 'Enrollment is inactive'
+                }
+            
+            if enrollment.is_expired:
+                return {
+                    'status': 'expired',
+                    'message': 'Enrollment has expired',
+                    'expired_on': enrollment.expiry_date
+                }
+            
+            # Active and not expired
+            return {
+                'status': 'active',
+                'message': 'User has active access to this course',
+                'plan_type': enrollment.plan_type,
+                'plan_name': enrollment.get_plan_type_display(),
+                'expires_on': enrollment.expiry_date if enrollment.plan_type != CoursePlanType.LIFETIME else None,
+                'is_lifetime': enrollment.plan_type == CoursePlanType.LIFETIME
+            }
+        except Exception as e:
+            logger.error(f"Error getting enrollment status: {str(e)}")
+            return {
+                'status': 'error',
+                'message': 'Error checking enrollment status'
+            }
+
 
 class CourseDetailSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source='category.name', read_only=True)
-    enrolled_students = serializers.SerializerMethodField(read_only=True)
+    enrolled_students = serializers.SerializerMethodField()
     objectives = CourseObjectiveSerializer(many=True, read_only=True)
     requirements = CourseRequirementSerializer(many=True, read_only=True)
     curriculum = CourseCurriculumSerializer(many=True, read_only=True)
     is_enrolled = serializers.SerializerMethodField()
     is_wishlisted = serializers.SerializerMethodField()
     user_enrollment = serializers.SerializerMethodField()
-    enrollment_status = serializers.SerializerMethodField() 
+    enrollment_status = serializers.SerializerMethodField()
     
     class Meta:
         model = Course
@@ -350,27 +458,29 @@ class CourseDetailSerializer(serializers.ModelSerializer):
         ]
     
     def get_enrolled_students(self, obj):
-        """
-        OPTIMIZED: Use prefetched enrollments instead of separate query
-        """
-        # This will use the prefetched enrollments from the ViewSet
-        # instead of making a separate database query
+        """Get total number of enrolled students"""
+        # Use prefetched enrollments if available for performance
         if hasattr(obj, 'prefetched_objects_cache') and 'enrollments' in obj.prefetched_objects_cache:
-            return len(obj.prefetched_objects_cache['enrollments'])
+            return len([e for e in obj.prefetched_objects_cache['enrollments'] if e.is_active])
         
-        # Fallback to the original method if not prefetched
-        return obj.enrollments.count()
+        # Fallback to database query
+        return obj.enrollments.filter(is_active=True).count()
     
     def get_is_enrolled(self, obj):
         """Check if user has an active, non-expired enrollment"""
         request = self.context.get('request')
-        if request and request.user.is_authenticated:
+        if not request or not request.user.is_authenticated:
+            return False
+            
+        try:
             # Use prefetched enrollments if available
             if hasattr(obj, 'prefetched_objects_cache') and 'enrollments' in obj.prefetched_objects_cache:
                 enrollments = obj.prefetched_objects_cache['enrollments']
                 for enrollment in enrollments:
-                    if enrollment.user_id == request.user.id and enrollment.is_active:
-                        return not enrollment.is_expired
+                    if (enrollment.user_id == request.user.id and 
+                        enrollment.is_active and 
+                        not enrollment.is_expired):
+                        return True
                 return False
             
             # Fallback to database query
@@ -379,20 +489,30 @@ class CourseDetailSerializer(serializers.ModelSerializer):
                 is_active=True
             ).first()
             
-            if enrollment:
-                return not enrollment.is_expired
+            if not enrollment:
+                return False
+                
+            return not enrollment.is_expired
+            
+        except Exception as e:
+            logger.error(f"Error checking enrollment status: {str(e)}")
             return False
-        return False
     
     def get_is_wishlisted(self, obj):
+        """Check if course is in user's wishlist"""
         request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            return obj.wishlisted_by.filter(user=request.user).exists()
-        return False
+        if not request or not request.user.is_authenticated:
+            return False
+            
+        return obj.wishlisted_by.filter(user=request.user).exists()
     
     def get_user_enrollment(self, obj):
+        """Get user's enrollment details if enrolled"""
         request = self.context.get('request')
-        if request and request.user.is_authenticated:
+        if not request or not request.user.is_authenticated:
+            return None
+            
+        try:
             # Use prefetched enrollments if available
             if hasattr(obj, 'prefetched_objects_cache') and 'enrollments' in obj.prefetched_objects_cache:
                 enrollments = obj.prefetched_objects_cache['enrollments']
@@ -403,6 +523,8 @@ class CourseDetailSerializer(serializers.ModelSerializer):
                             'plan_type': enrollment.plan_type,
                             'plan_name': enrollment.get_plan_type_display(),
                             'expiry_date': enrollment.expiry_date,
+                            'date_enrolled': enrollment.date_enrolled,
+                            'amount_paid': enrollment.amount_paid,
                             'is_active': enrollment.is_active,
                             'is_expired': enrollment.is_expired
                         }
@@ -410,22 +532,35 @@ class CourseDetailSerializer(serializers.ModelSerializer):
             
             # Fallback to database query
             enrollment = obj.enrollments.filter(user=request.user).first()
-            if enrollment:
-                return {
-                    'id': enrollment.id,
-                    'plan_type': enrollment.plan_type,
-                    'plan_name': enrollment.get_plan_type_display(),
-                    'expiry_date': enrollment.expiry_date,
-                    'is_active': enrollment.is_active,
-                    'is_expired': enrollment.is_expired
-                }
-        return None
+            if not enrollment:
+                return None
+                
+            return {
+                'id': enrollment.id,
+                'plan_type': enrollment.plan_type,
+                'plan_name': enrollment.get_plan_type_display(),
+                'expiry_date': enrollment.expiry_date,
+                'date_enrolled': enrollment.date_enrolled,
+                'amount_paid': enrollment.amount_paid,
+                'is_active': enrollment.is_active,
+                'is_expired': enrollment.is_expired
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting user enrollment: {str(e)}")
+            return None
     
     def get_enrollment_status(self, obj):
         """Get detailed enrollment status for authenticated users"""
         request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            # Use the optimized get_user_enrollment method
+        if not request or not request.user.is_authenticated:
+            return {
+                'status': 'unauthenticated',
+                'message': 'User not authenticated'
+            }
+        
+        try:
+            # Get the user enrollment data
             enrollment_data = self.get_user_enrollment(obj)
             
             if not enrollment_data:
@@ -456,12 +591,13 @@ class CourseDetailSerializer(serializers.ModelSerializer):
                 'expires_on': enrollment_data['expiry_date'] if enrollment_data['plan_type'] != CoursePlanType.LIFETIME else None,
                 'is_lifetime': enrollment_data['plan_type'] == CoursePlanType.LIFETIME
             }
-        
-        return {
-            'status': 'unauthenticated',
-            'message': 'User not authenticated'
-        }
-
+            
+        except Exception as e:
+            logger.error(f"Error getting enrollment status: {str(e)}")
+            return {
+                'status': 'error',
+                'message': 'Error checking enrollment status'
+            }
 class CourseCreateUpdateSerializer(serializers.ModelSerializer):
     objectives = CourseObjectiveSerializer(many=True, required=False)  # Change this to required=False
     requirements = CourseRequirementSerializer(many=True, required=False)  # Change this to required=False
