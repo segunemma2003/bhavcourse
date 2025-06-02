@@ -1098,3 +1098,85 @@ class ResetPasswordSerializer(serializers.Serializer):
     
 class FirebaseAuthSerializer(serializers.Serializer):
     id_token = serializers.CharField(required=True)
+    
+    
+class StudentEnrollmentDetailSerializer(serializers.ModelSerializer):
+    """Detailed serializer for student enrollments with course info"""
+    course_title = serializers.CharField(source='course.title', read_only=True)
+    course_image = serializers.ImageField(source='course.image', read_only=True)
+    course_category = serializers.CharField(source='course.category.name', read_only=True)
+    course_location = serializers.CharField(source='course.location', read_only=True)
+    plan_name = serializers.CharField(source='get_plan_type_display', read_only=True)
+    is_expired = serializers.BooleanField(read_only=True)
+    days_remaining = serializers.SerializerMethodField()
+    enrollment_status = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Enrollment
+        fields = [
+            'id', 'course', 'course_title', 'course_image', 'course_category', 
+            'course_location', 'date_enrolled', 'plan_type', 'plan_name', 
+            'expiry_date', 'amount_paid', 'is_active', 'is_expired', 
+            'days_remaining', 'enrollment_status'
+        ]
+    
+    def get_days_remaining(self, obj):
+        """Calculate days remaining until expiry"""
+        if obj.plan_type == 'LIFETIME':
+            return None  # Lifetime access
+        
+        if not obj.expiry_date:
+            return None
+        
+        from django.utils import timezone
+        now = timezone.now()
+        
+        if obj.expiry_date <= now:
+            return 0  # Already expired
+        
+        delta = obj.expiry_date - now
+        return delta.days
+    
+    def get_enrollment_status(self, obj):
+        """Get detailed enrollment status"""
+        if not obj.is_active:
+            return {
+                'status': 'inactive',
+                'message': 'Enrollment is inactive',
+                'color': 'red'
+            }
+        
+        if obj.is_expired:
+            return {
+                'status': 'expired',
+                'message': 'Enrollment has expired',
+                'color': 'red'
+            }
+        
+        if obj.plan_type == 'LIFETIME':
+            return {
+                'status': 'active_lifetime',
+                'message': 'Lifetime access',
+                'color': 'green'
+            }
+        
+        days_remaining = self.get_days_remaining(obj)
+        if days_remaining is None:
+            return {
+                'status': 'active',
+                'message': 'Active enrollment',
+                'color': 'green'
+            }
+        
+        if days_remaining <= 7:
+            return {
+                'status': 'expiring_soon',
+                'message': f'Expires in {days_remaining} days',
+                'color': 'orange'
+            }
+        
+        return {
+            'status': 'active',
+            'message': f'Active - {days_remaining} days remaining',
+            'color': 'green'
+        }
