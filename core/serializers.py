@@ -985,41 +985,6 @@ class UserSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'email']
 
 # Update CourseListSerializer and CourseDetailSerializer to include enrollment and wishlist status
-class CourseListSerializer(serializers.ModelSerializer):
-    category_name = serializers.CharField(source='category.name', read_only=True)
-    enrolled_students = serializers.IntegerField(read_only=True)
-    is_enrolled = serializers.SerializerMethodField()
-    is_wishlisted = serializers.SerializerMethodField()
-    
-    
-    class Meta:
-        model = Course
-        fields = [
-            'id', 'title', 'image', 'small_desc','description', 'category', 
-            'category_name', 'is_featured', 'date_uploaded', 'price_one_month','price_three_months','price_lifetime',
-            'location', 'enrolled_students', 'is_enrolled', 'is_wishlisted'
-        ]
-    
-    def get_is_enrolled(self, obj):
-        """Check if user has an active, non-expired enrollment"""
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            enrollment = obj.enrollments.filter(
-                user=request.user,
-                is_active=True
-            ).first()
-            
-            if enrollment:
-                return not enrollment.is_expired
-            return False
-        return False
-    
-    def get_is_wishlisted(self, obj):
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            return Wishlist.objects.filter(user=request.user, course=obj).exists()
-        return False
-
 
     
 
