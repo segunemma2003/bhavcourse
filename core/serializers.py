@@ -990,34 +990,210 @@ class CourseListSerializer(serializers.ModelSerializer):
     enrolled_students = serializers.IntegerField(read_only=True)
     is_enrolled = serializers.SerializerMethodField()
     is_wishlisted = serializers.SerializerMethodField()
+    objectives = CourseObjectiveSerializer(many=True, read_only=True)
+    requirements = CourseRequirementSerializer(many=True, read_only=True)
+    curriculum = CourseCurriculumSerializer(many=True, read_only=True)
+    user_enrollment = serializers.SerializerMethodField()
+    enrollment_status = serializers.SerializerMethodField()
     
     class Meta:
         model = Course
         fields = [
-            'id', 'title', 'image', 'small_desc','description', 'category', 
-            'category_name', 'is_featured', 'date_uploaded', 'price_one_month','price_three_months','price_lifetime',
-            'location', 'enrolled_students', 'is_enrolled', 'is_wishlisted'
+            'id', 'title', 'image', 'small_desc', 'description', 
+            'category', 'category_name', 'is_featured', 'date_uploaded', 
+            'location', 'price_one_month', 'price_three_months', 
+            'price_lifetime', 'objectives', 'requirements', 'curriculum',
+            'user_enrollment', 'enrollment_status'
         ]
     
+    def get_enrolled_students(self, obj):
+        """Get total number of active enrolled students"""
+        try:
+            # Use prefetched enrollments if available for performance
+            if hasattr(obj, 'prefetched_objects_cache') and 'enrollments' in obj.prefetched_objects_cache:
+                return len([e for e in obj.prefetched_objects_cache['enrollments'] if e.is_active])
+            
+            # Fallback to database query
+            return obj.enrollments.filter(is_active=True).count()
+        except Exception as e:
+            logger.error(f"Error getting enrolled students count: {str(e)}")
+            return 0
+    
     def get_is_enrolled(self, obj):
-        """Check if user has an active, non-expired enrollment"""
+        """Check if the current user has an active, non-expired enrollment"""
         request = self.context.get('request')
-        if request and request.user.is_authenticated:
+        if not request or not request.user.is_authenticated:
+            return False
+            
+        try:
+            # Use prefetched enrollments if available
+            if hasattr(obj, 'prefetched_objects_cache') and 'enrollments' in obj.prefetched_objects_cache:
+                enrollments = obj.prefetched_objects_cache['enrollments']
+                for enrollment in enrollments:
+                    if (enrollment.user_id == request.user.id and 
+                        enrollment.is_active and 
+                        not enrollment.is_expired):
+                        return True
+                return False
+            
+            # Fallback to database query
             enrollment = obj.enrollments.filter(
                 user=request.user,
                 is_active=True
             ).first()
             
-            if enrollment:
-                return not enrollment.is_expired
+            if not enrollment:
+                return False
+                
+            # Check if enrollment is expired
+            return not enrollment.is_expired
+            
+        except Exception as e:
+            logger.error(f"Error checking enrollment status: {str(e)}")
             return False
-        return False
     
     def get_is_wishlisted(self, obj):
+        """Check if the course is in user's wishlist"""
         request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            return Wishlist.objects.filter(user=request.user, course=obj).exists()
-        return False
+        if not request or not request.user.is_authenticated:
+            return False
+            
+        try:
+            # Use prefetched wishlist if available
+            if hasattr(obj, 'prefetched_objects_cache') and 'wishlisted_by' in obj.prefetched_objects_cache:
+                wishlisted_by = obj.prefetched_objects_cache['wishlisted_by']
+                return any(w.user_id == request.user.id for w in wishlisted_by)
+            
+            # Fallback to database query
+            return obj.wishlisted_by.filter(user=request.user).exists()
+        except Exception as e:
+            logger.error(f"Error checking wishlist status: {str(e)}")
+            return False
+    
+    def get_user_enrollment(self, obj):
+        """Get detailed enrollment information for the current user"""
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return None
+            
+        try:
+            enrollment = None
+            
+            # Use prefetched enrollments if available
+            if hasattr(obj, 'prefetched_objects_cache') and 'enrollments' in obj.prefetched_objects_cache:
+                enrollments = obj.prefetched_objects_cache['enrollments']
+                for enr in enrollments:
+                    if enr.user_id == request.user.id:
+                        enrollment = enr
+                        break
+            else:
+                # Fallback to database query
+                enrollment = obj.enrollments.filter(user=request.user).first()
+            
+            if not enrollment:
+                return None
+                
+            return {
+                'id': enrollment.id,
+                'plan_type': enrollment.plan_type,
+                'plan_name': enrollment.get_plan_type_display(),
+                'expiry_date': enrollment.expiry_date,
+                'date_enrolled': enrollment.date_enrolled,
+                'amount_paid': enrollment.amount_paid,
+                'is_active': enrollment.is_active,
+                'is_expired': enrollment.is_expired,
+                'days_remaining': enrollment.get_days_remaining() if hasattr(enrollment, 'get_days_remaining') else None
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting user enrollment: {str(e)}")
+            return None
+    
+    def get_enrollment_status(self, obj):
+        """Get detailed enrollment status with user-friendly messages"""
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return {
+                'status': 'unauthenticated',
+                'message': 'User not authenticated',
+                'can_enroll': True,
+                'color': 'gray'
+            }
+        
+        try:
+            # Get the user enrollment data
+            enrollment_data = self.get_user_enrollment(obj)
+            
+            if not enrollment_data:
+                return {
+                    'status': 'not_enrolled',
+                    'message': 'Not enrolled in this course',
+                    'can_enroll': True,
+                    'color': 'blue'
+                }
+            
+            if not enrollment_data['is_active']:
+                return {
+                    'status': 'inactive',
+                    'message': 'Enrollment is inactive',
+                    'can_enroll': True,
+                    'color': 'red'
+                }
+            
+            if enrollment_data['is_expired']:
+                return {
+                    'status': 'expired',
+                    'message': f"Enrollment expired on {enrollment_data['expiry_date'].strftime('%Y-%m-%d') if enrollment_data['expiry_date'] else 'N/A'}",
+                    'expired_on': enrollment_data['expiry_date'],
+                    'can_enroll': True,
+                    'color': 'red'
+                }
+            
+            # Active and not expired
+            if enrollment_data['plan_type'] == CoursePlanType.LIFETIME:
+                return {
+                    'status': 'active_lifetime',
+                    'message': 'Lifetime access - never expires',
+                    'plan_type': enrollment_data['plan_type'],
+                    'plan_name': enrollment_data['plan_name'],
+                    'is_lifetime': True,
+                    'can_enroll': False,
+                    'color': 'green'
+                }
+            else:
+                days_remaining = enrollment_data.get('days_remaining', 0)
+                if days_remaining is None:
+                    message = 'Active enrollment'
+                elif days_remaining <= 3:
+                    message = f'Expires in {days_remaining} days - Renew soon!'
+                    color = 'orange'
+                elif days_remaining <= 7:
+                    message = f'Expires in {days_remaining} days'
+                    color = 'yellow'
+                else:
+                    message = f'Active - {days_remaining} days remaining'
+                    color = 'green'
+                
+                return {
+                    'status': 'active',
+                    'message': message,
+                    'plan_type': enrollment_data['plan_type'],
+                    'plan_name': enrollment_data['plan_name'],
+                    'expires_on': enrollment_data['expiry_date'],
+                    'days_remaining': days_remaining,
+                    'is_lifetime': False,
+                    'can_enroll': False,
+                    'color': color if 'color' in locals() else 'green'
+                }
+            
+        except Exception as e:
+            logger.error(f"Error getting enrollment status: {str(e)}")
+            return {
+                'status': 'error',
+                'message': 'Error checking enrollment status',
+                'can_enroll': True,
+                'color': 'red'
+            }
 
 
     
