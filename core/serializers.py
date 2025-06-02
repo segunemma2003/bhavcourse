@@ -987,22 +987,32 @@ class UserSerializer(serializers.ModelSerializer):
 # Update CourseListSerializer and CourseDetailSerializer to include enrollment and wishlist status
 class CourseListSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source='category.name', read_only=True)
-    enrolled_students = serializers.IntegerField(read_only=True)
+    enrolled_students = serializers.SerializerMethodField()
     is_enrolled = serializers.SerializerMethodField()
     is_wishlisted = serializers.SerializerMethodField()
+    user_enrollment = serializers.SerializerMethodField()
+    enrollment_status = serializers.SerializerMethodField()
+    
+    # Include detailed course information directly
     objectives = CourseObjectiveSerializer(many=True, read_only=True)
     requirements = CourseRequirementSerializer(many=True, read_only=True)
     curriculum = CourseCurriculumSerializer(many=True, read_only=True)
-    user_enrollment = serializers.SerializerMethodField()
-    enrollment_status = serializers.SerializerMethodField()
     
     class Meta:
         model = Course
         fields = [
-            'id', 'title', 'image', 'small_desc', 'description', 
-            'category', 'category_name', 'is_featured', 'date_uploaded', 
-            'location', 'price_one_month', 'price_three_months', 
-            'price_lifetime', 'objectives', 'requirements', 'curriculum',
+            # Basic course fields
+            'id', 'title', 'image', 'small_desc', 'description', 'category', 
+            'category_name', 'is_featured', 'date_uploaded', 'location',
+            
+            # Price fields
+            'price_one_month', 'price_three_months', 'price_lifetime',
+            
+            # Detailed course content
+            'objectives', 'requirements', 'curriculum', 
+            
+            # User-specific and computed fields
+            'enrolled_students', 'is_enrolled', 'is_wishlisted',
             'user_enrollment', 'enrollment_status'
         ]
     
@@ -1164,6 +1174,7 @@ class CourseListSerializer(serializers.ModelSerializer):
                 days_remaining = enrollment_data.get('days_remaining', 0)
                 if days_remaining is None:
                     message = 'Active enrollment'
+                    color = 'green'
                 elif days_remaining <= 3:
                     message = f'Expires in {days_remaining} days - Renew soon!'
                     color = 'orange'
@@ -1183,7 +1194,7 @@ class CourseListSerializer(serializers.ModelSerializer):
                     'days_remaining': days_remaining,
                     'is_lifetime': False,
                     'can_enroll': False,
-                    'color': color if 'color' in locals() else 'green'
+                    'color': color
                 }
             
         except Exception as e:
@@ -1194,10 +1205,7 @@ class CourseListSerializer(serializers.ModelSerializer):
                 'can_enroll': True,
                 'color': 'red'
             }
-
-
-    
-
+            
 class NotificationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Notification
