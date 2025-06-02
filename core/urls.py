@@ -2,7 +2,7 @@
 
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from core.admin_views import AdminAddStudentToPlanView, AdminBulkEnrollmentOperationsView, AdminMetricsView, AdminRemoveStudentFromPlanView, ContentPageViewSet, EnrolledStudentsListView, GeneralSettingsView, PublicContentPageView, UserListView
+from core.admin_views import AdminAddStudentToPlanView, AdminAllStudentsEnrollmentsView, AdminBulkEnrollmentOperationsView, AdminMetricsView, AdminRemoveStudentFromPlanView, AdminStudentEnrollmentsView, ContentPageViewSet, EnrolledStudentsListView, GeneralSettingsView, PublicContentPageView, UserListView
 from core.firebase_auth_view import FirebaseGoogleAuthView
 from core.payment_views import CreateOrderView, VerifyPaymentView, cancel_subscription, razorpay_webhook, renew_subscription
 from core.views_presign import GeneratePresignedURLView, S3DebugView
@@ -120,5 +120,12 @@ urlpatterns = [
       path('admin/remove-student-from-plan/', AdminRemoveStudentFromPlanView.as_view(), name='admin-remove-student-from-plan'),
     path('admin/bulk-enrollment-operations/', AdminBulkEnrollmentOperationsView.as_view(), name='admin-bulk-enrollment-operations'),
  path('debug-enrollments/', debug_enrollments, name='debug-enrollments'),
+  path('admin/students/<int:user_id>/enrollments/', 
+         AdminStudentEnrollmentsView.as_view(), 
+         name='admin-student-enrollments-detail'),
+    
+    path('admin/students-enrollments-overview/', 
+         AdminAllStudentsEnrollmentsView.as_view(), 
+         name='admin-students-enrollments-overview'),
     
 ]

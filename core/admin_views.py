@@ -11,13 +11,13 @@ from django.db.models.functions import TruncDate, TruncWeek, TruncMonth
 from .models import Course, CoursePlanType, Notification, PaymentCard, PaymentOrder, User, Purchase, ContentPage, GeneralSettings
 from .serializers import (
     AdminMetricsSerializer, ContentPageSerializer, 
-    GeneralSettingsSerializer, CourseListSerializer
+    GeneralSettingsSerializer, CourseListSerializer, StudentEnrollmentDetailSerializer
 )
 from django.core.cache import cache
 from rest_framework import serializers
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
-from django.db.models import Count, Q
+from django.db.models import Count, Q,  Prefetch
 from .serializers import UserDetailsSerializer
 from django.contrib.auth import get_user_model
 from .models import Enrollment
@@ -1708,4 +1708,524 @@ class AdminBulkEnrollmentOperationsView(generics.CreateAPIView):
             'user_id': user.id,
             'course_id': course.id,
             'reason': reason
+        }
+        
+class AdminStudentEnrollmentsView(generics.RetrieveAPIView):
+    """
+    Admin API endpoint for viewing a specific student's enrollment details.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsAdminUser]
+    
+    @swagger_auto_schema(
+        operation_summary="Admin: Get student enrollment details",
+        operation_description="""
+        Admin-only endpoint to view detailed enrollment information for a specific student.
+        
+        **Returns comprehensive enrollment data including:**
+        - Student basic information (email, name, phone, etc.)
+        - All enrolled courses with detailed information
+        - Enrollment status (active, expired, expiring soon, etc.)
+        - Days remaining for each enrollment
+        - Plan types and expiration dates
+        - Payment amounts for each enrollment
+        - Course categories and locations
+        
+        **Use Cases:**
+        - Check student's current enrollment status
+        - Monitor expiring enrollments
+        - Review payment history per course
+        - Provide customer support
+        - Audit enrollment data
+        """,
+        manual_parameters=[
+            openapi.Parameter(
+                'user_id', 
+                openapi.IN_PATH, 
+                description="ID of the student to retrieve enrollment details for", 
+                type=openapi.TYPE_INTEGER,
+                required=True
+            ),
+            openapi.Parameter(
+                'include_inactive', 
+                openapi.IN_QUERY, 
+                description="Include inactive enrollments (default: false)", 
+                type=openapi.TYPE_BOOLEAN,
+                default=False
+            ),
+            openapi.Parameter(
+                'plan_type', 
+                openapi.IN_QUERY, 
+                description="Filter by plan type (ONE_MONTH, THREE_MONTHS, LIFETIME)", 
+                type=openapi.TYPE_STRING
+            ),
+            openapi.Parameter(
+                'status', 
+                openapi.IN_QUERY, 
+                description="Filter by status (active, expired, expiring_soon)", 
+                type=openapi.TYPE_STRING
+            ),
+        ],
+        responses={
+            status.HTTP_200_OK: openapi.Response(
+                description="Student enrollment details retrieved successfully",
+                examples={
+                    "application/json": {
+                        "success": True,
+                        "data": {
+                            "student": {
+                                "id": 123,
+                                "email": "student@example.com",
+                                "full_name": "John Doe",
+                                "phone_number": "+1234567890",
+                                "date_of_birth": "1995-01-15",
+                                "profile_picture_url": "https://example.com/profile.jpg"
+                            },
+                            "enrollment_summary": {
+                                "total_enrollments": 5,
+                                "active_enrollments": 3,
+                                "expired_enrollments": 1,
+                                "expiring_soon": 1,
+                                "lifetime_enrollments": 2,
+                                "total_amount_paid": "1299.00"
+                            },
+                            "enrollments": [
+                                {
+                                    "id": 456,
+                                    "course": 101,
+                                    "course_title": "Advanced Python Programming",
+                                    "course_category": "Programming",
+                                    "course_location": "Online",
+                                    "date_enrolled": "2024-12-01T10:30:00Z",
+                                    "plan_type": "LIFETIME",
+                                    "plan_name": "Lifetime",
+                                    "expiry_date": None,
+                                    "amount_paid": "299.00",
+                                    "is_active": True,
+                                    "is_expired": False,
+                                    "days_remaining": None,
+                                    "enrollment_status": {
+                                        "status": "active_lifetime",
+                                        "message": "Lifetime access",
+                                        "color": "green"
+                                    }
+                                },
+                                {
+                                    "id": 457,
+                                    "course": 102,
+                                    "course_title": "Data Science Fundamentals",
+                                    "course_category": "Data Science",
+                                    "course_location": "Hybrid",
+                                    "date_enrolled": "2025-01-15T14:20:00Z",
+                                    "plan_type": "THREE_MONTHS",
+                                    "plan_name": "Three Months",
+                                    "expiry_date": "2025-04-15T14:20:00Z",
+                                    "amount_paid": "199.00",
+                                    "is_active": True,
+                                    "is_expired": False,
+                                    "days_remaining": 73,
+                                    "enrollment_status": {
+                                        "status": "active",
+                                        "message": "Active - 73 days remaining",
+                                        "color": "green"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                },
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'success': openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                        'data': openapi.Schema(
+                            type=openapi.TYPE_OBJECT,
+                            properties={
+                                'student': openapi.Schema(
+                                    type=openapi.TYPE_OBJECT,
+                                    properties={
+                                        'id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                        'email': openapi.Schema(type=openapi.TYPE_STRING),
+                                        'full_name': openapi.Schema(type=openapi.TYPE_STRING),
+                                        'phone_number': openapi.Schema(type=openapi.TYPE_STRING),
+                                        'date_of_birth': openapi.Schema(type=openapi.TYPE_STRING),
+                                        'profile_picture_url': openapi.Schema(type=openapi.TYPE_STRING)
+                                    }
+                                ),
+                                'enrollment_summary': openapi.Schema(
+                                    type=openapi.TYPE_OBJECT,
+                                    properties={
+                                        'total_enrollments': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                        'active_enrollments': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                        'expired_enrollments': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                        'expiring_soon': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                        'lifetime_enrollments': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                        'total_amount_paid': openapi.Schema(type=openapi.TYPE_STRING)
+                                    }
+                                ),
+                                'enrollments': openapi.Schema(
+                                    type=openapi.TYPE_ARRAY,
+                                    items=openapi.Schema(
+                                        type=openapi.TYPE_OBJECT,
+                                        properties={
+                                            'id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                            'course': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                            'course_title': openapi.Schema(type=openapi.TYPE_STRING),
+                                            'course_category': openapi.Schema(type=openapi.TYPE_STRING),
+                                            'course_location': openapi.Schema(type=openapi.TYPE_STRING),
+                                            'date_enrolled': openapi.Schema(type=openapi.TYPE_STRING),
+                                            'plan_type': openapi.Schema(type=openapi.TYPE_STRING),
+                                            'plan_name': openapi.Schema(type=openapi.TYPE_STRING),
+                                            'expiry_date': openapi.Schema(type=openapi.TYPE_STRING),
+                                            'amount_paid': openapi.Schema(type=openapi.TYPE_STRING),
+                                            'is_active': openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                                            'is_expired': openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                                            'days_remaining': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                            'enrollment_status': openapi.Schema(
+                                                type=openapi.TYPE_OBJECT,
+                                                properties={
+                                                    'status': openapi.Schema(type=openapi.TYPE_STRING),
+                                                    'message': openapi.Schema(type=openapi.TYPE_STRING),
+                                                    'color': openapi.Schema(type=openapi.TYPE_STRING)
+                                                }
+                                            )
+                                        }
+                                    )
+                                )
+                            }
+                        )
+                    }
+                )
+            ),
+            status.HTTP_404_NOT_FOUND: openapi.Response(
+                description="Student not found",
+                examples={
+                    "application/json": {
+                        "error": "Student not found"
+                    }
+                }
+            ),
+            status.HTTP_403_FORBIDDEN: openapi.Response(
+                description="Admin access required",
+                examples={
+                    "application/json": {
+                        "detail": "You do not have permission to perform this action."
+                    }
+                }
+            )
+        }
+    )
+    def get(self, request, user_id, *args, **kwargs):
+        try:
+            # Get the student
+            student = User.objects.get(pk=user_id, is_staff=False, is_superuser=False)
+        except User.DoesNotExist:
+            return Response(
+                {'error': 'Student not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Get query parameters for filtering
+        include_inactive = request.query_params.get('include_inactive', 'false').lower() == 'true'
+        plan_type_filter = request.query_params.get('plan_type')
+        status_filter = request.query_params.get('status')
+        
+        # Build enrollment query with optimized database access
+        enrollment_query = Enrollment.objects.select_related(
+            'course',
+            'course__category'
+        ).filter(user=student)
+        
+        # Apply filters
+        if not include_inactive:
+            enrollment_query = enrollment_query.filter(is_active=True)
+        
+        if plan_type_filter:
+            enrollment_query = enrollment_query.filter(plan_type=plan_type_filter)
+        
+        # Get enrollments
+        enrollments = list(enrollment_query.order_by('-date_enrolled'))
+        
+        # Apply status filter (needs to be done after fetching due to computed fields)
+        if status_filter:
+            filtered_enrollments = []
+            for enrollment in enrollments:
+                enrollment_status = self._get_enrollment_status(enrollment)
+                if status_filter == 'active' and enrollment_status['status'] in ['active', 'active_lifetime']:
+                    filtered_enrollments.append(enrollment)
+                elif status_filter == 'expired' and enrollment_status['status'] == 'expired':
+                    filtered_enrollments.append(enrollment)
+                elif status_filter == 'expiring_soon' and enrollment_status['status'] == 'expiring_soon':
+                    filtered_enrollments.append(enrollment)
+                elif status_filter == 'inactive' and enrollment_status['status'] == 'inactive':
+                    filtered_enrollments.append(enrollment)
+            enrollments = filtered_enrollments
+        
+        # Serialize enrollments
+        enrollment_serializer = StudentEnrollmentDetailSerializer(enrollments, many=True)
+        
+        # Calculate summary statistics
+        summary = self._calculate_enrollment_summary(enrollments)
+        
+        # Serialize student information
+        student_serializer = UserDetailsSerializer(student)
+        
+        response_data = {
+            'student': student_serializer.data,
+            'enrollment_summary': summary,
+            'enrollments': enrollment_serializer.data
+        }
+        
+        return Response({"success": True, "data": response_data}, status=status.HTTP_200_OK)
+    
+    def _get_enrollment_status(self, enrollment):
+        """Helper method to get enrollment status"""
+        if not enrollment.is_active:
+            return {
+                'status': 'inactive',
+                'message': 'Enrollment is inactive',
+                'color': 'red'
+            }
+        
+        if enrollment.is_expired:
+            return {
+                'status': 'expired',
+                'message': 'Enrollment has expired',
+                'color': 'red'
+            }
+        
+        if enrollment.plan_type == 'LIFETIME':
+            return {
+                'status': 'active_lifetime',
+                'message': 'Lifetime access',
+                'color': 'green'
+            }
+        
+        if enrollment.expiry_date:
+            from django.utils import timezone
+            now = timezone.now()
+            
+            if enrollment.expiry_date <= now:
+                return {
+                    'status': 'expired',
+                    'message': 'Enrollment has expired',
+                    'color': 'red'
+                }
+            
+            delta = enrollment.expiry_date - now
+            days_remaining = delta.days
+            
+            if days_remaining <= 7:
+                return {
+                    'status': 'expiring_soon',
+                    'message': f'Expires in {days_remaining} days',
+                    'color': 'orange'
+                }
+        
+        return {
+            'status': 'active',
+            'message': 'Active enrollment',
+            'color': 'green'
+        }
+    
+    def _calculate_enrollment_summary(self, enrollments):
+        """Calculate summary statistics for enrollments"""
+        total_enrollments = len(enrollments)
+        active_enrollments = 0
+        expired_enrollments = 0
+        expiring_soon = 0
+        lifetime_enrollments = 0
+        total_amount_paid = 0
+        
+        for enrollment in enrollments:
+            total_amount_paid += float(enrollment.amount_paid)
+            
+            if enrollment.plan_type == 'LIFETIME':
+                lifetime_enrollments += 1
+            
+            status_info = self._get_enrollment_status(enrollment)
+            status = status_info['status']
+            
+            if status in ['active', 'active_lifetime']:
+                active_enrollments += 1
+            elif status == 'expired':
+                expired_enrollments += 1
+            elif status == 'expiring_soon':
+                expiring_soon += 1
+                active_enrollments += 1  # Expiring soon is still active
+        
+        return {
+            'total_enrollments': total_enrollments,
+            'active_enrollments': active_enrollments,
+            'expired_enrollments': expired_enrollments,
+            'expiring_soon': expiring_soon,
+            'lifetime_enrollments': lifetime_enrollments,
+            'total_amount_paid': f"{total_amount_paid:.2f}"
+        }
+
+class AdminAllStudentsEnrollmentsView(generics.ListAPIView):
+    """
+    Admin API endpoint for viewing enrollment overview of all students.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsAdminUser]
+    
+    @swagger_auto_schema(
+        operation_summary="Admin: Get all students enrollment overview",
+        operation_description="""
+        Admin-only endpoint to get an overview of enrollments for all students.
+        
+        **Returns a paginated list with:**
+        - Student basic information
+        - Enrollment count per student
+        - Total amount paid per student
+        - Most recent enrollment date
+        - Active/expired enrollment counts
+        """,
+        manual_parameters=[
+            openapi.Parameter(
+                'search', 
+                openapi.IN_QUERY, 
+                description="Search students by email, name, or phone", 
+                type=openapi.TYPE_STRING
+            ),
+            openapi.Parameter(
+                'has_active_enrollments', 
+                openapi.IN_QUERY, 
+                description="Filter students with active enrollments only", 
+                type=openapi.TYPE_BOOLEAN
+            ),
+            openapi.Parameter(
+                'min_enrollments', 
+                openapi.IN_QUERY, 
+                description="Minimum number of enrollments", 
+                type=openapi.TYPE_INTEGER
+            ),
+        ],
+        responses={
+            status.HTTP_200_OK: openapi.Response(
+                description="Students enrollment overview",
+                examples={
+                    "application/json": {
+                        "count": 50,
+                        "next": "http://example.com/api/admin/students-enrollments/?page=2",
+                        "previous": None,
+                        "results": [
+                            {
+                                "student": {
+                                    "id": 123,
+                                    "email": "student1@example.com",
+                                    "full_name": "John Doe",
+                                    "phone_number": "+1234567890"
+                                },
+                                "enrollment_stats": {
+                                    "total_enrollments": 5,
+                                    "active_enrollments": 3,
+                                    "expired_enrollments": 2,
+                                    "total_amount_paid": "899.00",
+                                    "last_enrollment_date": "2025-01-15T10:30:00Z"
+                                }
+                            }
+                        ]
+                    }
+                }
+            )
+        }
+    )
+    def get(self, request, *args, **kwargs):
+        # Get query parameters
+        search = request.query_params.get('search')
+        has_active_enrollments = request.query_params.get('has_active_enrollments')
+        min_enrollments = request.query_params.get('min_enrollments')
+        
+        # Base query for students with enrollments
+        students_query = User.objects.filter(
+            is_staff=False,
+            is_superuser=False,
+            enrollments__isnull=False
+        ).distinct()
+        
+        # Apply search filter
+        if search:
+            students_query = students_query.filter(
+                Q(email__icontains=search) |
+                Q(full_name__icontains=search) |
+                Q(phone_number__icontains=search)
+            )
+        
+        # Apply active enrollments filter
+        if has_active_enrollments and has_active_enrollments.lower() == 'true':
+            students_query = students_query.filter(
+                enrollments__is_active=True
+            ).distinct()
+        
+        # Prefetch enrollments for efficient querying
+        students_query = students_query.prefetch_related(
+            Prefetch(
+                'enrollments',
+                queryset=Enrollment.objects.select_related('course')
+            )
+        )
+        
+        # Get students
+        students = list(students_query.order_by('-date_joined'))
+        
+        # Calculate stats and apply min_enrollments filter
+        students_with_stats = []
+        for student in students:
+            stats = self._calculate_student_stats(student)
+            
+            # Apply minimum enrollments filter
+            if min_enrollments:
+                try:
+                    min_count = int(min_enrollments)
+                    if stats['total_enrollments'] < min_count:
+                        continue
+                except ValueError:
+                    pass
+            
+            students_with_stats.append({
+                'student': UserDetailsSerializer(student).data,
+                'enrollment_stats': stats
+            })
+        
+        # Manual pagination
+        from django.core.paginator import Paginator
+        paginator = Paginator(students_with_stats, 20)  # 20 students per page
+        page_number = request.query_params.get('page', 1)
+        page_obj = paginator.get_page(page_number)
+        
+        # Build response with pagination
+        response_data = {
+            'count': paginator.count,
+            'next': None,
+            'previous': None,
+            'results': page_obj.object_list
+        }
+        
+        # Add pagination URLs if needed
+        if page_obj.has_next():
+            response_data['next'] = f"{request.build_absolute_uri()}?page={page_obj.next_page_number()}"
+        if page_obj.has_previous():
+            response_data['previous'] = f"{request.build_absolute_uri()}?page={page_obj.previous_page_number()}"
+        
+        return Response(response_data, status=status.HTTP_200_OK)
+    
+    def _calculate_student_stats(self, student):
+        """Calculate enrollment statistics for a student"""
+        enrollments = list(student.enrollments.all())
+        
+        total_enrollments = len(enrollments)
+        active_enrollments = sum(1 for e in enrollments if e.is_active and not e.is_expired)
+        expired_enrollments = sum(1 for e in enrollments if e.is_expired or not e.is_active)
+        total_amount_paid = sum(float(e.amount_paid) for e in enrollments)
+        
+        last_enrollment_date = None
+        if enrollments:
+            last_enrollment_date = max(e.date_enrolled for e in enrollments)
+        
+        return {
+            'total_enrollments': total_enrollments,
+            'active_enrollments': active_enrollments,
+            'expired_enrollments': expired_enrollments,
+            'total_amount_paid': f"{total_amount_paid:.2f}",
+            'last_enrollment_date': last_enrollment_date
         }
