@@ -92,6 +92,12 @@ class User(AbstractBaseUser, PermissionsMixin):
             self.save()
             return True
         return False
+    
+    class Meta:
+        indexes = [
+            models.Index(fields=['email']),
+            models.Index(fields=['is_active']),
+        ]
 
 class Category(models.Model):
     name = models.CharField(max_length=100)
@@ -163,7 +169,8 @@ class Course(models.Model):
     class Meta:
         ordering = ['-date_uploaded']
         indexes = [
-            models.Index(fields=['is_featured']),
+            models.Index(fields=['category', 'is_featured']),
+            models.Index(fields=['is_featured', 'date_uploaded']),
             models.Index(fields=['category']),
             models.Index(fields=['date_uploaded']),
         ]
@@ -185,9 +192,12 @@ class Enrollment(models.Model):
         unique_together = ['user', 'course']
         ordering = ['-date_enrolled']
         indexes = [
-            models.Index(fields=['user', 'course', 'is_active']),
+            models.Index(fields=['user', 'is_active']),
+            models.Index(fields=['user', 'date_enrolled']),
+            models.Index(fields=['course', 'is_active']),
             models.Index(fields=['expiry_date']),
             models.Index(fields=['plan_type']),
+            models.Index(fields=['is_active', 'date_enrolled']),
         ]
     
     def __str__(self):

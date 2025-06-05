@@ -11,6 +11,7 @@ from django.core.cache import cache
 from django.conf import settings
 from django.db.models import Q
 
+from core.func import performance_monitor
 from core.permissions import IsEnrolledOrAdmin
 from .services import RazorpayService,  process_course_purchase
 from .tasks import send_push_notification
@@ -930,6 +931,7 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
             # Fallback to simple query if optimization fails
             return Enrollment.objects.filter(user=self.request.user).order_by('-date_enrolled')
     
+    @performance_monitor
     def list(self, request, *args, **kwargs):
         """
         OPTIMIZED: Add caching to avoid repeated expensive queries with better error handling

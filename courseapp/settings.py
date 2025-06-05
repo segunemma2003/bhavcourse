@@ -271,15 +271,27 @@ CACHES = {
         'OPTIONS': {
             'CLIENT_CLASS': 'django_redis.client.DefaultClient',
             'CONNECTION_POOL_KWARGS': {
-                'max_connections': 50,
+                'max_connections': 100,  # Increased for high traffic
                 'retry_on_timeout': True,
-            }
+                'health_check_interval': 30,
+            },
+            'SERIALIZER': 'django_redis.serializers.json.JSONSerializer',
+            'COMPRESSOR': 'django_redis.compressors.zlib.ZlibCompressor',
         },
-        'KEY_PREFIX': 'enrollment_cache',
-        'TIMEOUT': 300,  # 5 minutes default
+        'KEY_PREFIX': 'courseapp',
+        'TIMEOUT': 3600,  # 1 hour default
+    },
+    'sessions': {
+        'BACKEND': 'django_redis.cache.RedisCache',
+        'LOCATION': 'redis://127.0.0.1:6379/2',
+        'OPTIONS': {
+            'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+        },
+        'KEY_PREFIX': 'sessions',
     }
 }
-
+SESSION_ENGINE = 'django.contrib.sessions.backends.cache'
+SESSION_CACHE_ALIAS = 'sessions'
 
 LOGS_DIR = os.path.join(BASE_DIR, 'logs')
 if not os.path.exists(LOGS_DIR):
@@ -308,9 +320,13 @@ DATABASES = {
         'PORT': os.environ.get('DB_PORT', '3306'),
         'CONN_MAX_AGE': 60,  # 10 minutes
         'OPTIONS': {
-           
             'charset': 'utf8mb4',
             'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
+            'sql_mode': 'STRICT_TRANS_TABLES',
+            # Connection pool settings
+            'MAX_CONNS': 50,
+            'MIN_CONNS': 10,
+            'CONN_HEALTH_CHECKS': True,
         },
     }
 }
