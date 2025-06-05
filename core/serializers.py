@@ -331,36 +331,46 @@ class CourseListSerializer(serializers.ModelSerializer):
             return 0
     
     def get_is_enrolled(self, obj):
-        """
-        FIXED: Check if user has an active, non-expired enrollment
-        This is the same logic that works in featured/top courses
-        """
+        """Optimized enrollment check with caching"""
         request = self.context.get('request')
         if not request or not request.user.is_authenticated:
             return False
-            
+        
+        # Check cache first
+        from django.core.cache import cache
+        cache_key = f"user_enrolled_{request.user.id}_{obj.id}"
+        cached_result = cache.get(cache_key)
+        
+        if cached_result is not None:
+            return cached_result
+        
         try:
-            # Use prefetched enrollments if available
+            # Use prefetched data if available
             if hasattr(obj, 'prefetched_objects_cache') and 'enrollments' in obj.prefetched_objects_cache:
                 enrollments = obj.prefetched_objects_cache['enrollments']
                 for enrollment in enrollments:
                     if (enrollment.user_id == request.user.id and 
                         enrollment.is_active and 
                         not enrollment.is_expired):
+                        cache.set(cache_key, True, 600)  # Cache for 10 minutes
                         return True
+                cache.set(cache_key, False, 600)
                 return False
             
-            # Fallback to database query - THIS IS THE CORRECT LOGIC
+            # Fallback to database query
             enrollment = obj.enrollments.filter(
                 user=request.user,
                 is_active=True
             ).first()
             
             if not enrollment:
-                return False
-                
-            # CRITICAL: Check if enrollment is expired
-            return not enrollment.is_expired
+                result = False
+            else:
+                result = not enrollment.is_expired
+            
+            # Cache the result
+            cache.set(cache_key, result, 600)
+            return result
             
         except Exception as e:
             logger.error(f"Error checking enrollment status: {str(e)}")
@@ -1234,7 +1244,7 @@ class StudentEnrollmentDetailSerializer(serializers.ModelSerializer):
         }
         
 class LightweightCourseSerializer(serializers.ModelSerializer):
-    """Minimal course data for enrollment lists"""
+    """Minimal course data for enrollment lists - NO nested queries"""
     category_name = serializers.CharField(source='category.name', read_only=True)
     
     class Meta:
@@ -1242,6 +1252,31 @@ class LightweightCourseSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'title', 'image', 'small_desc', 'category_name'
         ]
+
+
+class LightweightEnrollmentSerializer(serializers.ModelSerializer):
+    """ULTRA-FAST enrollment serializer for list views"""
+    course = LightweightCourseSerializer(read_only=True)
+    plan_name = serializers.CharField(source='get_plan_type_display', read_only=True)
+    is_expired = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Enrollment
+        fields = [
+            'id', 'course', 'date_enrolled', 'plan_type', 'plan_name',
+            'expiry_date', 'amount_paid', 'is_active', 'is_expired'
+        ]
+    
+    def get_is_expired(self, obj):
+        """Compute expiry without additional queries"""
+        if obj.plan_type == 'LIFETIME':
+            return False
+        if not obj.expiry_date:
+            return False
+        
+        # Use timezone-aware comparison
+        from django.utils import timezone
+        return obj.expiry_date <= timezone.now()
 
 
 class EnrollmentListSerializer(serializers.ModelSerializer):

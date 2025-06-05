@@ -329,6 +329,10 @@ DATABASES = {
     }
 }
 
+
+CACHES['default']['TIMEOUT'] = 7200  # 2 hours
+CACHES['default']['OPTIONS']['CONNECTION_POOL_KWARGS']['max_connections'] = 100
+
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
 

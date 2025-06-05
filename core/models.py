@@ -235,6 +235,16 @@ class Enrollment(models.Model):
                 self.expiry_date = base_date + timezone.timedelta(days=90)
         
         super().save(*args, **kwargs)
+        from django.core.cache import cache
+        cache_patterns = [
+            f"enrollments_v4_{self.user_id}_true",
+            f"enrollments_v4_{self.user_id}_false",
+            f"enrollment_status_{self.user_id}_{self.course_id}",
+            f"enrollment_detail_{self.user_id}_{self.id}"
+        ]
+        for pattern in cache_patterns:
+            cache.delete(pattern)
+
     
     def get_days_remaining(self):
         """
