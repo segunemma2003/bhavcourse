@@ -31,7 +31,7 @@ from .models import (
 )
 from .serializers import (
     CourseCurriculumSerializer, CourseListSerializer, CourseDetailSerializer, CategorySerializer,
-    CourseCreateUpdateSerializer, CourseObjectiveSerializer, CourseRequirementSerializer, CreateOrderSerializer, EnrollmentSerializer, FCMDeviceSerializer, 
+    CourseCreateUpdateSerializer, CourseObjectiveSerializer, CourseRequirementSerializer, CreateOrderSerializer, EnrollmentListSerializer, EnrollmentSerializer, FCMDeviceSerializer, 
     NotificationSerializer, PurchaseCourseSerializer, SubscriptionPlanSerializer, SubscriptionPlanCreateUpdateSerializer, UserDetailsSerializer, UserProfilePictureSerializer, UserProfilePictureUploadSerializer,
     UserSubscriptionSerializer, VerifyPaymentSerializer, WishlistSerializer, 
     PaymentCardSerializer, PurchaseSerializer, UserSerializer,
@@ -1153,20 +1153,56 @@ class SimpleEnrollmentViewSet(viewsets.ModelViewSet):
     serializer_class = EnrollmentSerializer
     permission_classes = [permissions.IsAuthenticated]
     
+    
+    def get_serializer_class(self):
+        """Use different serializers for different actions"""
+        if self.action == 'list':
+            return EnrollmentListSerializer  # Fast for lists
+        return EnrollmentSerializer  # Detailed for individual items
+    
     def get_queryset(self):
         if getattr(self, 'swagger_fake_view', False):
             return Enrollment.objects.none()
-        return Enrollment.objects.filter(user=self.request.user).order_by('-date_enrolled')
+        
+        # Optimize based on action
+        if self.action == 'list':
+            # Minimal query for list view
+            return Enrollment.objects.filter(
+                user=self.request.user,
+                is_active=True
+            ).select_related(
+                'course', 'course__category'
+            ).only(
+                'id', 'date_enrolled', 'plan_type', 'expiry_date', 
+                'amount_paid', 'is_active',
+                'course__id', 'course__title', 'course__image', 
+                'course__category__name'
+            ).order_by('-date_enrolled')[:50]
+        else:
+            # Full query for detail view
+            return Enrollment.objects.filter(
+                user=self.request.user
+            ).select_related(
+                'course', 'course__category'
+            ).prefetch_related(
+                models.Prefetch('course__objectives', queryset=CourseObjective.objects.all()),
+                models.Prefetch('course__requirements', queryset=CourseRequirement.objects.all()),
+                models.Prefetch('course__curriculum', queryset=CourseCurriculum.objects.order_by('order'))
+            ).order_by('-date_enrolled')
     
     def list(self, request, *args, **kwargs):
-        try:
-            return super().list(request, *args, **kwargs)
-        except Exception as e:
-            logger.error(f"Error in simple enrollment list: {str(e)}")
-            return Response(
-                {"error": "Failed to fetch enrollments", "detail": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+        """Optimized list with caching"""
+        cache_key = self._get_cache_key(request)
+        cached_data = cache.get(cache_key)
+        if cached_data:
+            return Response(cached_data)
+        
+        queryset = self.get_queryset()
+        serializer = self.get_serializer(queryset, many=True)
+        response_data = serializer.data
+        
+        cache.set(cache_key, response_data, 3600)
+        return Response(response_data)
 
 class SubscriptionPlanViewSet(viewsets.ModelViewSet):
     """

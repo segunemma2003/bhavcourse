@@ -1243,6 +1243,23 @@ class LightweightCourseSerializer(serializers.ModelSerializer):
             'id', 'title', 'image', 'small_desc', 'category_name'
         ]
 
+
+class EnrollmentListSerializer(serializers.ModelSerializer):
+    """Fast serializer for enrollment lists - minimal course data"""
+    course_id = serializers.IntegerField(source='course.id', read_only=True)
+    course_title = serializers.CharField(source='course.title', read_only=True)
+    course_image = serializers.ImageField(source='course.image', read_only=True)
+    course_category = serializers.CharField(source='course.category.name', read_only=True)
+    plan_name = serializers.CharField(source='get_plan_type_display', read_only=True)
+    is_expired = serializers.BooleanField(read_only=True)
+    
+    class Meta:
+        model = Enrollment
+        fields = [
+            'id', 'course_id', 'course_title', 'course_image', 'course_category',
+            'date_enrolled', 'plan_type', 'plan_name', 'expiry_date', 
+            'amount_paid', 'is_active', 'is_expired'
+        ]
 class LightweightEnrollmentSerializer(serializers.ModelSerializer):
     """Optimized enrollment serializer with minimal nested data"""
     course = LightweightCourseSerializer(read_only=True)
