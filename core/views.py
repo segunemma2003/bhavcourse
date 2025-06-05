@@ -31,7 +31,7 @@ from .models import (
 )
 from .serializers import (
     CourseCurriculumSerializer, CourseListSerializer, CourseDetailSerializer, CategorySerializer,
-    CourseCreateUpdateSerializer, CourseObjectiveSerializer, CourseRequirementSerializer, CreateOrderSerializer, EnrollmentListSerializer, EnrollmentSerializer, FCMDeviceSerializer, 
+    CourseCreateUpdateSerializer, CourseObjectiveSerializer, CourseRequirementSerializer, CreateOrderSerializer, EnrollmentListSerializer, EnrollmentSerializer, FCMDeviceSerializer, LightweightEnrollmentSerializer, 
     NotificationSerializer, PurchaseCourseSerializer, SubscriptionPlanSerializer, SubscriptionPlanCreateUpdateSerializer, UserDetailsSerializer, UserProfilePictureSerializer, UserProfilePictureUploadSerializer,
     UserSubscriptionSerializer, VerifyPaymentSerializer, WishlistSerializer, 
     PaymentCardSerializer, PurchaseSerializer, UserSerializer,

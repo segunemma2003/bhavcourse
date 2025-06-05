@@ -1295,23 +1295,3 @@ class EnrollmentListSerializer(serializers.ModelSerializer):
             'date_enrolled', 'plan_type', 'plan_name', 'expiry_date', 
             'amount_paid', 'is_active', 'is_expired'
         ]
-class LightweightEnrollmentSerializer(serializers.ModelSerializer):
-    """Optimized enrollment serializer with minimal nested data"""
-    course = LightweightCourseSerializer(read_only=True)
-    plan_name = serializers.CharField(source='get_plan_type_display', read_only=True)
-    is_expired = serializers.SerializerMethodField()
-    
-    class Meta:
-        model = Enrollment
-        fields = [
-            'id', 'course', 'date_enrolled', 'plan_type', 'plan_name',
-            'expiry_date', 'amount_paid', 'is_active', 'is_expired'
-        ]
-    
-    def get_is_expired(self, obj):
-        """Compute expiry without additional queries"""
-        if obj.plan_type == 'LIFETIME':
-            return False
-        if not obj.expiry_date:
-            return False
-        return obj.expiry_date <= timezone.now()
