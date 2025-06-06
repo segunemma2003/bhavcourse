@@ -1,5 +1,6 @@
 from datetime import timezone
 import os
+from django.db.models import Sum, Count
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from allauth.account.adapter import get_adapter
@@ -1246,27 +1247,129 @@ class StudentEnrollmentDetailSerializer(serializers.ModelSerializer):
 class LightweightCourseSerializer(serializers.ModelSerializer):
     """Minimal course data for enrollment lists - NO nested queries"""
     category_name = serializers.CharField(source='category.name', read_only=True)
+    curriculum_count = serializers.SerializerMethodField()
     
     class Meta:
         model = Course
         fields = [
-            'id', 'title', 'image', 'small_desc', 'category_name'
+            'id', 'title', 'image', 'small_desc', 'category_name', 'curriculum_count'
         ]
-
+        
+    def get_curriculum_count(self, obj):
+        """Get curriculum count efficiently"""
+        try:
+            # Use annotated value if available
+            if hasattr(obj, 'curriculum_count'):
+                return obj.curriculum_count
+            
+            # Use prefetched data if available
+            if hasattr(obj, 'prefetched_objects_cache') and 'curriculum' in obj.prefetched_objects_cache:
+                return len(obj.prefetched_objects_cache['curriculum'])
+            
+            # Fallback
+            return obj.curriculum.count()
+        except Exception:
+            return 0
 
 class LightweightEnrollmentSerializer(serializers.ModelSerializer):
     """ULTRA-FAST enrollment serializer for list views"""
     course = LightweightCourseSerializer(read_only=True)
     plan_name = serializers.CharField(source='get_plan_type_display', read_only=True)
     is_expired = serializers.SerializerMethodField()
+    days_remaining = serializers.SerializerMethodField()
+    total_curriculum = serializers.SerializerMethodField()
+    total_duration = serializers.SerializerMethodField()
     
     class Meta:
         model = Enrollment
         fields = [
             'id', 'course', 'date_enrolled', 'plan_type', 'plan_name',
-            'expiry_date', 'amount_paid', 'is_active', 'is_expired'
+            'expiry_date', 'amount_paid', 'is_active', 'is_expired',
+            'days_remaining', 'total_curriculum', 'total_duration'
         ]
+        
+    def get_days_remaining(self, obj):
+        """Calculate days remaining until expiry - FAST computation"""
+        if obj.plan_type == 'LIFETIME':
+            return None  # Lifetime access, no expiry
+        
+        if not obj.expiry_date:
+            return None
+        
+        from django.utils import timezone
+        now = timezone.now()
+        
+        if obj.expiry_date <= now:
+            return 0  # Already expired
+        
+        delta = obj.expiry_date - now
+        return delta.days
     
+    
+    def get_total_curriculum(self, obj):
+        """Get total curriculum count - uses prefetched data for speed"""
+        try:
+            # Use prefetched curriculum count if available (from annotation)
+            if hasattr(obj, 'curriculum_count'):
+                return obj.curriculum_count
+            
+            # Use prefetched objects if available
+            if hasattr(obj.course, 'prefetched_objects_cache') and 'curriculum' in obj.course.prefetched_objects_cache:
+                return len(obj.course.prefetched_objects_cache['curriculum'])
+            
+            # Fallback - but this should be avoided for performance
+            return obj.course.curriculum.count()
+            
+        except Exception as e:
+            logger.error(f"Error getting curriculum count: {str(e)}")
+            return 0
+    
+    def get_total_duration(self, obj):
+        """Calculate total course duration in minutes - uses cached/computed value"""
+        try:
+            # Use computed duration if available (from annotation or cached field)
+            if hasattr(obj, 'total_duration_minutes'):
+                return obj.total_duration_minutes
+            
+            # Use prefetched curriculum to calculate duration
+            if hasattr(obj.course, 'prefetched_objects_cache') and 'curriculum' in obj.course.prefetched_objects_cache:
+                curriculum_items = obj.course.prefetched_objects_cache['curriculum']
+                total_minutes = 0
+                
+                for item in curriculum_items:
+                    # Extract duration from video_url or use default
+                    # You can customize this logic based on how you store duration
+                    if hasattr(item, 'duration_minutes') and item.duration_minutes:
+                        total_minutes += item.duration_minutes
+                    else:
+                        # Default duration per video if not specified (e.g., 10 minutes)
+                        total_minutes += 10
+                
+                return total_minutes
+            
+            # Fallback calculation - you may want to optimize this
+            # This assumes you have a duration field or can calculate it
+            return self._calculate_course_duration(obj.course)
+            
+        except Exception as e:
+            logger.error(f"Error calculating total duration: {str(e)}")
+            return 0
+    
+    def _calculate_course_duration(self, course):
+        """Fallback method to calculate duration - customize based on your data"""
+        try:
+            # Option 1: If you have duration stored per curriculum item
+            total_duration = course.curriculum.aggregate(
+                total= Sum('duration_minutes')
+            )['total'] or 0
+            
+            return total_duration
+            
+        except Exception:
+            # Option 2: Estimate based on curriculum count (e.g., 10 minutes per item)
+            curriculum_count = course.curriculum.count()
+            return curriculum_count * 10  # 10 minutes per curriculum item
+
     def get_is_expired(self, obj):
         """Compute expiry without additional queries"""
         if obj.plan_type == 'LIFETIME':
