@@ -1078,13 +1078,13 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
                     def get_video_url(self, obj):
                         """Generate fresh presigned URL for S3 videos - NO CACHING"""
                         url = obj.video_url
-                        if url and is_s3_url(url):
-                            from core.s3_utils import generate_presigned_url
-                            # Generate fresh URL with long expiration
-                            fresh_url = generate_presigned_url(url, expiration=43200)  # 12 hours
-                            logger.debug(f"Generated fresh presigned URL for curriculum {obj.id}")
-                            return fresh_url
-                        return url
+                        
+                        from core.s3_utils import generate_presigned_url
+                        # Generate fresh URL with long expiration
+                        fresh_url = generate_presigned_url(url, expiration=43200)  # 12 hours
+                        logger.debug(f"Generated fresh presigned URL for curriculum {obj.id}")
+                        return fresh_url
+                        # return url
                 
                 # Override curriculum field to use fresh serializer
                 curriculum = FreshCourseCurriculumSerializer(many=True, read_only=True)
