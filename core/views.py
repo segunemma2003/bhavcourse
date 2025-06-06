@@ -1031,18 +1031,29 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
             )
     
     def retrieve(self, request, *args, **kwargs):
+        """FIXED: Retrieve with fresh presigned URLs"""
         try:
             enrollment_id = kwargs.get('pk')
-            cache_key = f"enrollment_detail_{request.user.id}_{enrollment_id}"
             
-            cached_data = cache.get(cache_key)
-            if cached_data:
-                return Response(cached_data)
+            # Don't cache detail views with video URLs - they need fresh presigned URLs
+            logger.info(f"Retrieving enrollment detail {enrollment_id} with fresh URLs")
             
-            response = super().retrieve(request, *args, **kwargs)
-            cache.set(cache_key, response.data, 600)  # Cache for 10 minutes
+            # Get enrollment with optimized query
+            enrollment = self.get_queryset().filter(id=enrollment_id).first()
+            if not enrollment:
+                return Response(
+                    {"error": "Enrollment not found"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
             
-            return response
+            # Use a special serializer that forces fresh presigned URLs
+            serializer = self.get_fresh_serializer(enrollment, context={'request': request})
+            response_data = serializer.data
+            
+            # Log to debug
+            logger.info(f"Retrieved enrollment {enrollment_id} for user {request.user.id}")
+            
+            return Response(response_data)
             
         except Exception as e:
             logger.error(f"Error in enrollment retrieve view: {str(e)}")
@@ -1050,6 +1061,37 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
                 {"error": "Failed to fetch enrollment details", "detail": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+    
+    def get_fresh_serializer(self, enrollment, context=None):
+        """Get serializer that generates fresh presigned URLs"""
+        
+        class FreshEnrollmentSerializer(EnrollmentSerializer):
+            """Enrollment serializer that forces fresh presigned URLs"""
+            
+            class FreshCourseDetailSerializer(CourseDetailSerializer):
+                """Course serializer with fresh curriculum URLs"""
+                
+                class FreshCourseCurriculumSerializer(CourseCurriculumSerializer):
+                    """Curriculum serializer that always generates fresh presigned URLs"""
+                    
+                    def get_video_url(self, obj):
+                        """Generate fresh presigned URL for S3 videos - NO CACHING"""
+                        url = obj.video_url
+                        if url and is_s3_url(url):
+                            from core.s3_utils import generate_presigned_url
+                            # Generate fresh URL with long expiration
+                            fresh_url = generate_presigned_url(url, expiration=43200)  # 12 hours
+                            logger.debug(f"Generated fresh presigned URL for curriculum {obj.id}")
+                            return fresh_url
+                        return url
+                
+                # Override curriculum field to use fresh serializer
+                curriculum = FreshCourseCurriculumSerializer(many=True, read_only=True)
+            
+            # Override course field to use fresh serializer
+            course = FreshCourseDetailSerializer(read_only=True)
+        
+        return FreshEnrollmentSerializer(enrollment, context=context)
     
     @action(detail=False, methods=['post'])
     def verify_payment(self, request):
