@@ -1054,7 +1054,7 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
                     fresh_url = generate_presigned_url(
                         curriculum_item.video_url, 
                         expiration=43200,  # 12 hours
-                        force_fresh=True   # Force fresh generation
+                       
                     )
                     # Temporarily store the fresh URL (don't save to DB)
                     curriculum_item._fresh_video_url = fresh_url
