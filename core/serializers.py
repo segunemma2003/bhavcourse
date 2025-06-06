@@ -278,31 +278,34 @@ class CourseCurriculumSerializer(serializers.ModelSerializer):
     
     def get_video_url(self, obj):
         """
-        Generate a presigned URL for S3 videos - ALWAYS FRESH
+        ALWAYS generate presigned URL for S3 videos - UNIVERSAL FIX
         """
         url = obj.video_url
         if url and is_s3_url(url):
-            # Use direct presigned URL generation (no caching)
             from core.s3_utils import generate_presigned_url
-            return generate_presigned_url(url, expiration=43200)  # 12 hour expiration
+            try:
+                # ALWAYS generate presigned URL regardless of context
+                presigned_url = generate_presigned_url(url, expiration=43200)  # 12 hour expiration
+                logger.debug(f"Generated presigned URL for curriculum {obj.id}")
+                return presigned_url
+            except Exception as e:
+                logger.error(f"Failed to generate presigned URL for curriculum {obj.id}: {str(e)}")
+                # Return original URL if presigned generation fails
+                return url
         return url
     
     def to_representation(self, instance):
         """
-        Override to_representation to ensure video_url is properly handled
+        Ensure video_url is properly handled in all cases
         """
         ret = super().to_representation(instance)
-        # Ensure video_url is properly returned even for write operations
-        if 'video_url' in ret and ret['video_url'] is None:
-            # If the URL is None in the database, return None
-            ret['video_url'] = None
+        # The get_video_url method will handle presigned URL generation
         return ret
 
     def to_internal_value(self, data):
         """
-        Keep the original URL when saving to database
+        Keep the original URL when saving to database - don't save presigned URLs
         """
-        # Store the original URL in internal value - don't try to save presigned URL
         return super().to_internal_value(data)
 
 class CourseListSerializer(serializers.ModelSerializer):
@@ -397,7 +400,39 @@ class CourseListSerializer(serializers.ModelSerializer):
             logger.error(f"Error checking wishlist status: {str(e)}")
             return False
 
-
+# Also create a lightweight version for the enrollment list to maintain performance
+class LightweightCourseCurriculumSerializer(serializers.ModelSerializer):
+    """Lightweight curriculum serializer for enrollment lists with presigned URLs"""
+    video_url = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = CourseCurriculum
+        fields = ['id', 'title', 'video_url']
+    
+    def get_video_url(self, obj):
+        """Generate presigned URL with caching for better performance"""
+        url = obj.video_url
+        if url and is_s3_url(url):
+            # Use cached presigned URL generation for performance
+            cache_key = f"presigned_url_v3_{hashlib.md5(url.encode()).hexdigest()}"
+            cached_url = cache.get(cache_key)
+            
+            if cached_url:
+                return cached_url
+            
+            try:
+                from core.s3_utils import generate_presigned_url
+                presigned_url = generate_presigned_url(url, expiration=43200)
+                
+                # Cache for 6 hours (shorter than expiration)
+                cache.set(cache_key, presigned_url, 21600)
+                return presigned_url
+                
+            except Exception as e:
+                logger.error(f"Failed to generate presigned URL: {str(e)}")
+                return url
+        return url
+    
 class CourseDetailSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source='category.name', read_only=True)
     enrolled_students = serializers.SerializerMethodField()
@@ -1276,7 +1311,7 @@ class LightweightCourseSerializer(serializers.ModelSerializer):
                             
 class LightweightEnrollmentSerializer(serializers.ModelSerializer):
     """
-    ULTRA-FAST enrollment serializer with duration from AWS URLs
+    ULTRA-FAST enrollment serializer with presigned video URLs
     """
     course = LightweightCourseSerializer(read_only=True)
     plan_name = serializers.CharField(source='get_plan_type_display', read_only=True)
@@ -1305,30 +1340,27 @@ class LightweightEnrollmentSerializer(serializers.ModelSerializer):
     def get_days_remaining(self, obj):
         """Calculate days remaining until expiry"""
         if obj.plan_type == 'LIFETIME':
-            return None  # Lifetime access
+            return None
         
         if not obj.expiry_date:
             return None
         
         now = timezone.now()
         if obj.expiry_date <= now:
-            return 0  # Already expired
+            return 0
         
         delta = obj.expiry_date - now
         return delta.days
     
     def get_total_curriculum(self, obj):
-        """Get total curriculum count - uses annotated or prefetched data"""
+        """Get total curriculum count"""
         try:
-            # Method 1: Use annotated count (fastest)
             if hasattr(obj, 'curriculum_count'):
                 return obj.curriculum_count
             
-            # Method 2: Use prefetched objects
             if hasattr(obj.course, 'prefetched_objects_cache') and 'curriculum' in obj.course.prefetched_objects_cache:
                 return len(obj.course.prefetched_objects_cache['curriculum'])
             
-            # Method 3: Fallback
             return obj.course.curriculum.count()
             
         except Exception as e:
@@ -1336,12 +1368,10 @@ class LightweightEnrollmentSerializer(serializers.ModelSerializer):
             return 0
     
     def get_total_duration(self, obj):
-        """Calculate total duration from AWS video URLs with smart caching"""
+        """Calculate total duration from video URLs"""
         try:
             course_id = obj.course.id
-            
-            # Check cache first (course-level caching)
-            cache_key = f"course_duration_v2_{course_id}"
+            cache_key = f"course_duration_v4_{course_id}"
             cached_duration = cache.get(cache_key)
             
             if cached_duration is not None:
@@ -1349,21 +1379,19 @@ class LightweightEnrollmentSerializer(serializers.ModelSerializer):
             
             total_duration = 0
             
-            # Get curriculum items
+            # Get curriculum items with presigned URLs
             if hasattr(obj.course, 'prefetched_objects_cache') and 'curriculum' in obj.course.prefetched_objects_cache:
                 curriculum_items = obj.course.prefetched_objects_cache['curriculum']
             else:
                 curriculum_items = obj.course.curriculum.all()
             
-            # Calculate duration for each video
             for item in curriculum_items:
                 if item.video_url:
                     duration = self._extract_video_duration(item.video_url)
                     total_duration += duration
                 else:
-                    total_duration += 10  # Default 10 minutes for non-video items
+                    total_duration += 10
             
-            # Cache the result for 24 hours
             cache.set(cache_key, total_duration, 86400)
             return total_duration
             
@@ -1372,42 +1400,36 @@ class LightweightEnrollmentSerializer(serializers.ModelSerializer):
             return 0
     
     def _extract_video_duration(self, video_url):
-        """Extract duration from video URL with multiple methods"""
+        """Extract duration from video URL - same logic as before"""
         if not video_url:
             return 10
         
-        # Create cache key for this specific video
         url_hash = hashlib.md5(video_url.encode()).hexdigest()
-        cache_key = f"video_duration_v2_{url_hash}"
+        cache_key = f"video_duration_v4_{url_hash}"
         
-        # Check cache first
         cached_duration = cache.get(cache_key)
         if cached_duration is not None:
             return cached_duration
         
-        duration = 10  # Default
+        duration = 10
         
         try:
-            # Method 1: Extract from S3 metadata (fastest)
             duration = self._get_s3_metadata_duration(video_url)
             
             if duration == 10:
-                # Method 2: Extract from filename patterns
                 duration = self._extract_duration_from_filename(video_url)
                 
                 if duration == 10:
-                    # Method 3: Estimate from file size
                     duration = self._estimate_duration_from_filesize(video_url)
         
         except Exception as e:
             logger.debug(f"Duration extraction failed for {video_url}: {str(e)}")
         
-        # Cache for 7 days
         cache.set(cache_key, duration, 604800)
         return duration
     
     def _get_s3_metadata_duration(self, video_url):
-        """Extract duration from S3 object metadata"""
+        """Extract duration from S3 metadata"""
         try:
             from core.s3_utils import get_s3_key_and_bucket, is_s3_url
             from django.conf import settings
@@ -1420,7 +1442,6 @@ class LightweightEnrollmentSerializer(serializers.ModelSerializer):
             if not bucket_name or not object_key:
                 return 10
             
-            # Create S3 client
             s3_client = boto3.client(
                 's3',
                 aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
@@ -1428,11 +1449,9 @@ class LightweightEnrollmentSerializer(serializers.ModelSerializer):
                 region_name=settings.AWS_REGION
             )
             
-            # Get object metadata
             response = s3_client.head_object(Bucket=bucket_name, Key=object_key)
             metadata = response.get('Metadata', {})
             
-            # Check various metadata fields for duration
             duration_fields = [
                 'duration', 'duration-minutes', 'video-duration', 
                 'length', 'runtime', 'duration_minutes'
@@ -1442,7 +1461,6 @@ class LightweightEnrollmentSerializer(serializers.ModelSerializer):
                 if field in metadata:
                     try:
                         value = float(metadata[field])
-                        # Convert to minutes if necessary
                         if field.endswith('-seconds') or field == 'duration_seconds':
                             return int(value / 60)
                         else:
@@ -1450,24 +1468,18 @@ class LightweightEnrollmentSerializer(serializers.ModelSerializer):
                     except (ValueError, TypeError):
                         continue
             
-            # If no duration metadata, estimate from file size
             content_length = response.get('ContentLength', 0)
             if content_length > 0:
-                # Rough estimation: higher quality = more MB per minute
-                # Standard definition: ~8-15 MB/min
-                # HD: ~25-50 MB/min
-                # 4K: ~100+ MB/min
                 mb_size = content_length / (1024 * 1024)
                 
-                if mb_size < 50:  # Likely SD
+                if mb_size < 50:
                     estimated_minutes = max(3, int(mb_size / 12))
-                elif mb_size < 200:  # Likely HD
+                elif mb_size < 200:
                     estimated_minutes = max(3, int(mb_size / 35))
-                else:  # Likely 4K or very long
+                else:
                     estimated_minutes = max(5, int(mb_size / 80))
                 
-                # Cap estimation at reasonable limits
-                return min(estimated_minutes, 180)  # Max 3 hours
+                return min(estimated_minutes, 180)
             
         except Exception as e:
             logger.debug(f"S3 metadata extraction failed: {str(e)}")
@@ -1475,34 +1487,37 @@ class LightweightEnrollmentSerializer(serializers.ModelSerializer):
         return 10
     
     def _extract_duration_from_filename(self, video_url):
-        """Extract duration from URL/filename patterns"""
+        """Extract duration from filename patterns"""
         try:
             import re
             
-            # Common filename patterns
             patterns = [
-                r'_(\d+)min[_\.]',        # _15min_  or _15min.
-                r'_(\d+)m[_\.]',          # _15m_   or _15m.
-                r'-(\d+)min[_\.-]',       # -15min- or -15min.
-                r'-(\d+)m[_\.-]',         # -15m-   or -15m.
+                r'_(\d+)min[_\.]',        # _15min_
+                r'_(\d+)m[_\.]',          # _15m_
+                r'-(\d+)min[_\.-]',       # -15min-
+                r'-(\d+)m[_\.-]',         # -15m-
                 r'(\d+)minutes',          # 15minutes
-                r'duration[_-](\d+)',     # duration_15 or duration-15
-                r'(\d+)[_-]minutes',      # 15_minutes or 15-minutes
+                r'duration[_-](\d+)',     # duration_15
+                r'(\d+)[_-]minutes',      # 15_minutes
                 r'runtime[_-](\d+)',      # runtime_15
                 r'length[_-](\d+)',       # length_15
                 r'(\d+)mins',             # 15mins
-                r'(\d{1,3})m(\d{2})s',    # 15m30s format
+                r'(\d{1,3})m(\d{2})s',    # 15m30s
             ]
             
             for pattern in patterns:
                 match = re.search(pattern, video_url, re.IGNORECASE)
                 if match:
-                    if pattern.endswith(r'(\d{1,3})m(\d{2})s'):  # Handle mm:ss format
+                    if pattern.endswith(r'(\d{1,3})m(\d{2})s'):
                         minutes = int(match.group(1))
                         seconds = int(match.group(2))
                         total_minutes = minutes + (seconds / 60)
                         if 1 <= total_minutes <= 300:
                             return int(total_minutes)
+                    else:
+                        duration = int(match.group(1))
+                        if 1 <= duration <= 300:
+                            return duration
             
         except Exception as e:
             logger.debug(f"Filename pattern extraction failed: {str(e)}")
@@ -1510,7 +1525,7 @@ class LightweightEnrollmentSerializer(serializers.ModelSerializer):
         return 10
     
     def _estimate_duration_from_filesize(self, video_url):
-        """Estimate duration from file size using S3 head request"""
+        """Estimate duration from file size"""
         try:
             from core.s3_utils import get_s3_key_and_bucket, is_s3_url
             from django.conf import settings
@@ -1523,7 +1538,6 @@ class LightweightEnrollmentSerializer(serializers.ModelSerializer):
             if not bucket_name or not object_key:
                 return 10
             
-            # Create S3 client
             s3_client = boto3.client(
                 's3',
                 aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
@@ -1531,30 +1545,28 @@ class LightweightEnrollmentSerializer(serializers.ModelSerializer):
                 region_name=settings.AWS_REGION
             )
             
-            # Get just the content length
             response = s3_client.head_object(Bucket=bucket_name, Key=object_key)
             content_length = response.get('ContentLength', 0)
             
             if content_length > 0:
                 mb_size = content_length / (1024 * 1024)
                 
-                # Improved estimation based on common video formats
-                # These are rough estimates and can vary significantly
-                if mb_size < 10:      # Very small file
-                    return max(2, int(mb_size / 2))    # ~2MB per minute
-                elif mb_size < 50:    # Small to medium (likely SD or short HD)
-                    return max(3, int(mb_size / 8))    # ~8MB per minute
-                elif mb_size < 200:   # Medium (likely HD)
-                    return max(5, int(mb_size / 25))   # ~25MB per minute
-                elif mb_size < 500:   # Large (likely long HD or short 4K)
-                    return max(10, int(mb_size / 40))  # ~40MB per minute
-                else:                 # Very large (likely long 4K)
-                    return max(15, int(mb_size / 60))  # ~60MB per minute
+                if mb_size < 10:
+                    return max(2, int(mb_size / 2))
+                elif mb_size < 50:
+                    return max(3, int(mb_size / 8))
+                elif mb_size < 200:
+                    return max(5, int(mb_size / 25))
+                elif mb_size < 500:
+                    return max(10, int(mb_size / 40))
+                else:
+                    return max(15, int(mb_size / 60))
             
         except Exception as e:
             logger.debug(f"File size estimation failed: {str(e)}")
         
         return 10
+
 
 
 

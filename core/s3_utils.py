@@ -364,3 +364,19 @@ def get_cached_presigned_url(url, expiration=86400):
         logger.debug(f"Cached new presigned URL for {url}")
     
     return presigned_url
+
+
+
+def ensure_presigned_video_url(video_url):
+    """Utility function to ensure any video URL is converted to presigned if it's S3"""
+    if not video_url:
+        return video_url
+    
+    if is_s3_url(video_url):
+        try:
+            return generate_presigned_url(video_url, expiration=43200)
+        except Exception as e:
+            logger.error(f"Failed to generate presigned URL: {str(e)}")
+            return video_url
+    
+    return video_url
