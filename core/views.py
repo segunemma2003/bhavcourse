@@ -7,6 +7,7 @@ from rest_framework.decorators import action
 from django.db.models import Count
 from django.utils import timezone
 from django.core.mail import send_mail
+from core.s3_utils import generate_presigned_url, is_s3_url
 from django.core.cache import cache
 from django.conf import settings
 from django.db.models import Q, Prefetch
@@ -751,7 +752,7 @@ class CourseViewSet(viewsets.ModelViewSet):
                 CourseCurriculum.objects.create(
                     course=new_course,
                     title=curriculum_item.title,
-                    video_url=curriculum_item.video_url,
+                    video_url= generate_presigned_url(curriculum_item.video_url, 3600),
                     order=curriculum_item.order
                 )
             
@@ -1369,7 +1370,7 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
                 return 10
             
             # Generate presigned URL for ffprobe
-            from core.s3_utils import generate_presigned_url
+          
             presigned_url = generate_presigned_url(video_url, 3600)
             
             # Run ffprobe
