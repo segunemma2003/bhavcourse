@@ -1,4 +1,4 @@
-from datetime import timezone
+from django.utils import timezone
 import hashlib
 import os
 from django.core.cache import cache
