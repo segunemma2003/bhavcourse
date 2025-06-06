@@ -9,7 +9,7 @@ from django.utils import timezone
 from django.core.mail import send_mail
 from django.core.cache import cache
 from django.conf import settings
-from django.db.models import Q
+from django.db.models import Q, Prefetch
 
 from core.func import performance_monitor
 from core.permissions import IsEnrolledOrAdmin
@@ -883,7 +883,7 @@ class CourseViewSet(viewsets.ModelViewSet):
 
 class EnrollmentViewSet(viewsets.ModelViewSet):
     """
-    API endpoints for managing course enrollments - OPTIMIZED VERSION
+    API endpoints for managing course enrollments - UPDATED WITH DURATION EXTRACTION
     """
     serializer_class = EnrollmentSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -892,25 +892,36 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
     def get_serializer_class(self):
         """Use lightweight serializer for list views"""
         if self.action == 'list':
-            return LightweightEnrollmentSerializer  # You'll add this serializer
+            return LightweightEnrollmentSerializer
         return EnrollmentSerializer
     
     def get_queryset(self):
-        """ULTRA-OPTIMIZED: Different queries for different actions"""
+        """OPTIMIZED: Different queries for different actions with curriculum count annotation"""
         if getattr(self, 'swagger_fake_view', False):
             return self.queryset
         
         # ACTION-SPECIFIC OPTIMIZATION
         if self.action == 'list':
-            # MINIMAL QUERY FOR LIST - only essential fields
+            # MINIMAL QUERY FOR LIST - with curriculum count annotation
             return Enrollment.objects.filter(
                 user=self.request.user,
                 is_active=True  # Only show active enrollments
             ).select_related(
                 'course',           # Join course table
                 'course__category'  # Join category table  
+            ).annotate(
+                # Add curriculum count for fast access
+                curriculum_count=Count('course__curriculum')
+            ).prefetch_related(
+                # Prefetch curriculum for duration calculation
+                Prefetch(
+                    'course__curriculum',
+                    queryset=CourseCurriculum.objects.only(
+                        'id', 'title', 'video_url', 'order', 'course_id'
+                    ).order_by('order')
+                )
             ).only(
-                # Only fetch essential fields - reduces data transfer by 80%
+                # Only fetch essential fields - reduces data transfer
                 'id', 'date_enrolled', 'plan_type', 'expiry_date', 
                 'amount_paid', 'is_active',
                 'course__id', 'course__title', 'course__image', 
@@ -918,12 +929,14 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
             ).order_by('-date_enrolled')[:25]  # Limit to 25 most recent
             
         else:
-            # FULL QUERY FOR DETAIL VIEW ONLY
+            # FULL QUERY FOR DETAIL VIEW
             return Enrollment.objects.filter(
                 user=self.request.user
             ).select_related(
                 'course',
                 'course__category'
+            ).annotate(
+                curriculum_count=Count('course__curriculum')
             ).prefetch_related(
                 models.Prefetch(
                     'course__objectives',
@@ -944,7 +957,7 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
     def list(self, request, *args, **kwargs):
         """HEAVILY CACHED list with smart cache keys"""
         try:
-            # STEP 1: Check cache first (most important optimization)
+            # STEP 1: Check cache first
             cache_key = self._get_cache_key(request)
             cached_data = cache.get(cache_key)
             if cached_data:
@@ -959,14 +972,14 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
             # STEP 3: Early return if no data
             if not queryset.exists():
                 empty_result = []
-                cache.set(cache_key, empty_result, 1800)  # Cache empty result
+                cache.set(cache_key, empty_result, 1800)
                 return Response(empty_result)
             
-            # STEP 4: Use lightweight serializer
+            # STEP 4: Use lightweight serializer with duration extraction
             serializer = self.get_serializer(queryset, many=True, context={'request': request})
             response_data = serializer.data
             
-            # STEP 5: Cache for 1 hour (enrollments don't change often)
+            # STEP 5: Cache for 1 hour
             cache.set(cache_key, response_data, 3600)
             logger.info(f"Cached enrollment data for user {request.user.id}")
             
@@ -982,23 +995,21 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
     def _get_cache_key(self, request):
         """Generate deterministic cache key"""
         user_id = request.user.id
-        # Include any query params that affect results
         show_all = request.query_params.get('show_all', 'false')
-        key_data = f"enrollments_v4_{user_id}_{show_all}"
+        key_data = f"enrollments_v6_{user_id}_{show_all}"
         return hashlib.md5(key_data.encode()).hexdigest()
     
     def _clear_user_cache(self, user_id):
         """Clear cache when data changes"""
-        # Clear multiple cache variations
         for show_all in ['true', 'false']:
-            key_data = f"enrollments_v4_{user_id}_{show_all}"
+            key_data = f"enrollments_v6_{user_id}_{show_all}"
             cache_key = hashlib.md5(key_data.encode()).hexdigest()
             cache.delete(cache_key)
     
-    # Keep all your existing methods (create, destroy, etc.) but add cache clearing:
+    # Keep all your existing methods but add cache clearing:
     def create(self, request, *args, **kwargs):
         try:
-            self._clear_user_cache(request.user.id)  # Clear cache when creating
+            self._clear_user_cache(request.user.id)
             from .payment_views import CreateOrderView
             return CreateOrderView.as_view()(request)
         except Exception as e:
@@ -1010,7 +1021,7 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
     
     def destroy(self, request, *args, **kwargs):
         try:
-            self._clear_user_cache(request.user.id)  # Clear cache when deleting
+            self._clear_user_cache(request.user.id)
             return super().destroy(request, *args, **kwargs)
         except Exception as e:
             logger.error(f"Error in enrollment destroy: {str(e)}")
@@ -1019,7 +1030,6 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
-    # Keep all your other existing methods unchanged
     def retrieve(self, request, *args, **kwargs):
         try:
             enrollment_id = kwargs.get('pk')
@@ -1108,6 +1118,234 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
                 {"error": "Failed to check enrollment status", "detail": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+    
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        """Fast summary endpoint with aggregated data including total curriculum and duration"""
+        cache_key = f"enrollment_summary_v3_{request.user.id}"
+        cached_summary = cache.get(cache_key)
+        
+        if cached_summary:
+            return Response(cached_summary)
+        
+        # Use database aggregation for speed
+        from django.db.models import Count, Q, Sum
+        
+        summary = Enrollment.objects.filter(user=request.user).aggregate(
+            total_enrollments=Count('id'),
+            active_enrollments=Count('id', filter=Q(is_active=True)),
+            expired_enrollments=Count('id', filter=Q(is_active=True, expiry_date__lt=timezone.now())),
+            # Add total curriculum count across all enrollments
+            total_curriculum_items=Sum('course__curriculum__id', distinct=True)
+        )
+        
+        # Calculate total estimated duration
+        active_enrollments = Enrollment.objects.filter(
+            user=request.user, 
+            is_active=True
+        ).prefetch_related('course__curriculum')
+        
+        total_duration = 0
+        total_curriculum = 0
+        
+        for enrollment in active_enrollments:
+            curriculum_items = enrollment.course.curriculum.all()
+            total_curriculum += len(curriculum_items)
+            
+            # Extract duration from video URLs (cached per course)
+            course_duration = self._get_course_duration(enrollment.course.id, curriculum_items)
+            total_duration += course_duration
+        
+        summary.update({
+            'total_curriculum_items': total_curriculum,
+            'total_estimated_duration_minutes': total_duration,
+            'total_estimated_duration_hours': round(total_duration / 60, 1)
+        })
+        
+        # Cache summary for 30 minutes
+        cache.set(cache_key, summary, 1800)
+        return Response(summary)
+    
+    def _get_course_duration(self, course_id, curriculum_items):
+        """Get total duration for a course with caching"""
+        cache_key = f"course_duration_{course_id}"
+        cached_duration = cache.get(cache_key)
+        
+        if cached_duration is not None:
+            return cached_duration
+        
+        total_duration = 0
+        
+        for item in curriculum_items:
+            if item.video_url:
+                # Extract duration from video URL
+                duration = self._extract_video_duration(item.video_url)
+                total_duration += duration
+            else:
+                # Default duration if no video URL
+                total_duration += 10  # 10 minutes default
+        
+        # Cache course duration for 24 hours
+        cache.set(cache_key, total_duration, 86400)
+        return total_duration
+    
+    def _extract_video_duration(self, video_url):
+        """Extract video duration from AWS S3 URL or video metadata"""
+        cache_key = f"video_duration_{hashlib.md5(video_url.encode()).hexdigest()}"
+        cached_duration = cache.get(cache_key)
+        
+        if cached_duration is not None:
+            return cached_duration
+        
+        duration = 10  # Default 10 minutes
+        
+        try:
+            # Method 1: Try to extract from S3 metadata
+            duration = self._get_s3_video_duration(video_url)
+            
+            if duration == 10:  # If S3 method failed, try other methods
+                # Method 2: Extract from URL patterns (if duration is in filename)
+                duration = self._extract_duration_from_filename(video_url)
+                
+                if duration == 10:  # If filename method failed
+                    # Method 3: Use video processing library (slower but accurate)
+                    duration = self._get_video_duration_from_file(video_url)
+        
+        except Exception as e:
+            logger.warning(f"Failed to extract duration from {video_url}: {str(e)}")
+            duration = 10  # Fallback to default
+        
+        # Cache duration for 7 days
+        cache.set(cache_key, duration, 604800)
+        return duration
+    
+    def _get_s3_video_duration(self, video_url):
+        """Extract video duration from S3 object metadata"""
+        try:
+            from core.s3_utils import get_s3_key_and_bucket, is_s3_url
+            import boto3
+            
+            if not is_s3_url(video_url):
+                return 10
+            
+            bucket_name, object_key = get_s3_key_and_bucket(video_url)
+            if not bucket_name or not object_key:
+                return 10
+            
+            # Create S3 client
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+                aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+                region_name=settings.AWS_REGION
+            )
+            
+            # Get object metadata
+            response = s3_client.head_object(Bucket=bucket_name, Key=object_key)
+            metadata = response.get('Metadata', {})
+            
+            # Check for duration in metadata
+            if 'duration' in metadata:
+                return int(float(metadata['duration']))
+            elif 'duration-seconds' in metadata:
+                return int(float(metadata['duration-seconds']) / 60)
+            elif 'video-duration' in metadata:
+                return int(float(metadata['video-duration']))
+            
+            # Check content length for rough estimation (very rough!)
+            content_length = response.get('ContentLength', 0)
+            if content_length > 0:
+                # Very rough estimation: 1MB per minute of video (varies greatly)
+                estimated_minutes = max(5, content_length // (1024 * 1024))
+                return min(estimated_minutes, 120)  # Cap at 2 hours
+            
+        except Exception as e:
+            logger.debug(f"S3 duration extraction failed: {str(e)}")
+        
+        return 10
+    
+    def _extract_duration_from_filename(self, video_url):
+        """Try to extract duration from filename patterns"""
+        try:
+            import re
+            
+            # Common patterns in filenames
+            patterns = [
+                r'_(\d+)min_',           # _15min_
+                r'_(\d+)m_',             # _15m_
+                r'-(\d+)min-',           # -15min-
+                r'-(\d+)m-',             # -15m-
+                r'(\d+)minutes',         # 15minutes
+                r'duration-(\d+)',       # duration-15
+                r'(\d+)-minutes',        # 15-minutes
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, video_url, re.IGNORECASE)
+                if match:
+                    duration = int(match.group(1))
+                    if 1 <= duration <= 300:  # Reasonable range: 1-300 minutes
+                        return duration
+            
+        except Exception as e:
+            logger.debug(f"Filename duration extraction failed: {str(e)}")
+        
+        return 10
+    
+    def _get_video_duration_from_file(self, video_url):
+        """Get actual video duration using video processing (slower but accurate)"""
+        try:
+            # This method requires downloading the video file
+            # Only use for critical cases or with small video files
+            
+            # Option 1: Use ffprobe if available
+            duration = self._get_duration_with_ffprobe(video_url)
+            if duration > 0:
+                return duration
+            
+            # Option 2: Use moviepy (requires installation)
+            # from moviepy.editor import VideoFileClip
+            # clip = VideoFileClip(video_url)
+            # duration = int(clip.duration / 60)
+            # clip.close()
+            # return duration
+            
+        except Exception as e:
+            logger.debug(f"Video file duration extraction failed: {str(e)}")
+        
+        return 10
+    
+    def _get_duration_with_ffprobe(self, video_url):
+        """Use ffprobe to get video duration (requires ffmpeg installation)"""
+        try:
+            import subprocess
+            import json
+            
+            # Only try this for smaller files or in development
+            if 'development' not in settings.DEBUG:
+                return 10
+            
+            # Generate presigned URL for ffprobe
+            from core.s3_utils import generate_presigned_url
+            presigned_url = generate_presigned_url(video_url, 3600)
+            
+            # Run ffprobe
+            cmd = [
+                'ffprobe', '-v', 'quiet', '-print_format', 'json',
+                '-show_format', '-show_streams', presigned_url
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            
+            if result.returncode == 0:
+                data = json.loads(result.stdout)
+                duration_seconds = float(data['format']['duration'])
+                return int(duration_seconds / 60)
+            
+        except Exception as e:
+            logger.debug(f"ffprobe duration extraction failed: {str(e)}")
+        
+        return 10
             
 class SimpleEnrollmentViewSet(viewsets.ModelViewSet):
     """

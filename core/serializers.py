@@ -1,5 +1,7 @@
 from datetime import timezone
+import hashlib
 import os
+from django.core.cache import cache
 from django.db.models import Sum, Count
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
@@ -1243,7 +1245,7 @@ class StudentEnrollmentDetailSerializer(serializers.ModelSerializer):
             'message': f'Active - {days_remaining} days remaining',
             'color': 'green'
         }
-        
+
 class LightweightCourseSerializer(serializers.ModelSerializer):
     """Minimal course data for enrollment lists - NO nested queries"""
     category_name = serializers.CharField(source='category.name', read_only=True)
@@ -1258,7 +1260,7 @@ class LightweightCourseSerializer(serializers.ModelSerializer):
     def get_curriculum_count(self, obj):
         """Get curriculum count efficiently"""
         try:
-            # Use annotated value if available
+            # Use annotated value if available (fastest)
             if hasattr(obj, 'curriculum_count'):
                 return obj.curriculum_count
             
@@ -1271,8 +1273,11 @@ class LightweightCourseSerializer(serializers.ModelSerializer):
         except Exception:
             return 0
 
+                            
 class LightweightEnrollmentSerializer(serializers.ModelSerializer):
-    """ULTRA-FAST enrollment serializer for list views"""
+    """
+    ULTRA-FAST enrollment serializer with duration from AWS URLs
+    """
     course = LightweightCourseSerializer(read_only=True)
     plan_name = serializers.CharField(source='get_plan_type_display', read_only=True)
     is_expired = serializers.SerializerMethodField()
@@ -1288,36 +1293,42 @@ class LightweightEnrollmentSerializer(serializers.ModelSerializer):
             'days_remaining', 'total_curriculum', 'total_duration'
         ]
         
-    def get_days_remaining(self, obj):
-        """Calculate days remaining until expiry - FAST computation"""
+    def get_is_expired(self, obj):
+        """Fast expiry check without additional queries"""
         if obj.plan_type == 'LIFETIME':
-            return None  # Lifetime access, no expiry
+            return False
+        if not obj.expiry_date:
+            return False
+        
+        return obj.expiry_date <= timezone.now()
+    
+    def get_days_remaining(self, obj):
+        """Calculate days remaining until expiry"""
+        if obj.plan_type == 'LIFETIME':
+            return None  # Lifetime access
         
         if not obj.expiry_date:
             return None
         
-        from django.utils import timezone
         now = timezone.now()
-        
         if obj.expiry_date <= now:
             return 0  # Already expired
         
         delta = obj.expiry_date - now
         return delta.days
     
-    
     def get_total_curriculum(self, obj):
-        """Get total curriculum count - uses prefetched data for speed"""
+        """Get total curriculum count - uses annotated or prefetched data"""
         try:
-            # Use prefetched curriculum count if available (from annotation)
+            # Method 1: Use annotated count (fastest)
             if hasattr(obj, 'curriculum_count'):
                 return obj.curriculum_count
             
-            # Use prefetched objects if available
+            # Method 2: Use prefetched objects
             if hasattr(obj.course, 'prefetched_objects_cache') and 'curriculum' in obj.course.prefetched_objects_cache:
                 return len(obj.course.prefetched_objects_cache['curriculum'])
             
-            # Fallback - but this should be avoided for performance
+            # Method 3: Fallback
             return obj.course.curriculum.count()
             
         except Exception as e:
@@ -1325,76 +1336,344 @@ class LightweightEnrollmentSerializer(serializers.ModelSerializer):
             return 0
     
     def get_total_duration(self, obj):
-        """Calculate total course duration in minutes - uses cached/computed value"""
+        """Calculate total duration from AWS video URLs with smart caching"""
         try:
-            # Use computed duration if available (from annotation or cached field)
-            if hasattr(obj, 'total_duration_minutes'):
-                return obj.total_duration_minutes
+            course_id = obj.course.id
             
-            # Use prefetched curriculum to calculate duration
+            # Check cache first (course-level caching)
+            cache_key = f"course_duration_v2_{course_id}"
+            cached_duration = cache.get(cache_key)
+            
+            if cached_duration is not None:
+                return cached_duration
+            
+            total_duration = 0
+            
+            # Get curriculum items
             if hasattr(obj.course, 'prefetched_objects_cache') and 'curriculum' in obj.course.prefetched_objects_cache:
                 curriculum_items = obj.course.prefetched_objects_cache['curriculum']
-                total_minutes = 0
-                
-                for item in curriculum_items:
-                    # Extract duration from video_url or use default
-                    # You can customize this logic based on how you store duration
-                    if hasattr(item, 'duration_minutes') and item.duration_minutes:
-                        total_minutes += item.duration_minutes
-                    else:
-                        # Default duration per video if not specified (e.g., 10 minutes)
-                        total_minutes += 10
-                
-                return total_minutes
+            else:
+                curriculum_items = obj.course.curriculum.all()
             
-            # Fallback calculation - you may want to optimize this
-            # This assumes you have a duration field or can calculate it
-            return self._calculate_course_duration(obj.course)
+            # Calculate duration for each video
+            for item in curriculum_items:
+                if item.video_url:
+                    duration = self._extract_video_duration(item.video_url)
+                    total_duration += duration
+                else:
+                    total_duration += 10  # Default 10 minutes for non-video items
+            
+            # Cache the result for 24 hours
+            cache.set(cache_key, total_duration, 86400)
+            return total_duration
             
         except Exception as e:
             logger.error(f"Error calculating total duration: {str(e)}")
             return 0
     
-    def _calculate_course_duration(self, course):
-        """Fallback method to calculate duration - customize based on your data"""
-        try:
-            # Option 1: If you have duration stored per curriculum item
-            total_duration = course.curriculum.aggregate(
-                total= Sum('duration_minutes')
-            )['total'] or 0
-            
-            return total_duration
-            
-        except Exception:
-            # Option 2: Estimate based on curriculum count (e.g., 10 minutes per item)
-            curriculum_count = course.curriculum.count()
-            return curriculum_count * 10  # 10 minutes per curriculum item
-
-    def get_is_expired(self, obj):
-        """Compute expiry without additional queries"""
-        if obj.plan_type == 'LIFETIME':
-            return False
-        if not obj.expiry_date:
-            return False
+    def _extract_video_duration(self, video_url):
+        """Extract duration from video URL with multiple methods"""
+        if not video_url:
+            return 10
         
-        # Use timezone-aware comparison
-        from django.utils import timezone
-        return obj.expiry_date <= timezone.now()
+        # Create cache key for this specific video
+        url_hash = hashlib.md5(video_url.encode()).hexdigest()
+        cache_key = f"video_duration_v2_{url_hash}"
+        
+        # Check cache first
+        cached_duration = cache.get(cache_key)
+        if cached_duration is not None:
+            return cached_duration
+        
+        duration = 10  # Default
+        
+        try:
+            # Method 1: Extract from S3 metadata (fastest)
+            duration = self._get_s3_metadata_duration(video_url)
+            
+            if duration == 10:
+                # Method 2: Extract from filename patterns
+                duration = self._extract_duration_from_filename(video_url)
+                
+                if duration == 10:
+                    # Method 3: Estimate from file size
+                    duration = self._estimate_duration_from_filesize(video_url)
+        
+        except Exception as e:
+            logger.debug(f"Duration extraction failed for {video_url}: {str(e)}")
+        
+        # Cache for 7 days
+        cache.set(cache_key, duration, 604800)
+        return duration
+    
+    def _get_s3_metadata_duration(self, video_url):
+        """Extract duration from S3 object metadata"""
+        try:
+            from core.s3_utils import get_s3_key_and_bucket, is_s3_url
+            from django.conf import settings
+            import boto3
+            
+            if not is_s3_url(video_url):
+                return 10
+            
+            bucket_name, object_key = get_s3_key_and_bucket(video_url)
+            if not bucket_name or not object_key:
+                return 10
+            
+            # Create S3 client
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+                aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+                region_name=settings.AWS_REGION
+            )
+            
+            # Get object metadata
+            response = s3_client.head_object(Bucket=bucket_name, Key=object_key)
+            metadata = response.get('Metadata', {})
+            
+            # Check various metadata fields for duration
+            duration_fields = [
+                'duration', 'duration-minutes', 'video-duration', 
+                'length', 'runtime', 'duration_minutes'
+            ]
+            
+            for field in duration_fields:
+                if field in metadata:
+                    try:
+                        value = float(metadata[field])
+                        # Convert to minutes if necessary
+                        if field.endswith('-seconds') or field == 'duration_seconds':
+                            return int(value / 60)
+                        else:
+                            return int(value)
+                    except (ValueError, TypeError):
+                        continue
+            
+            # If no duration metadata, estimate from file size
+            content_length = response.get('ContentLength', 0)
+            if content_length > 0:
+                # Rough estimation: higher quality = more MB per minute
+                # Standard definition: ~8-15 MB/min
+                # HD: ~25-50 MB/min
+                # 4K: ~100+ MB/min
+                mb_size = content_length / (1024 * 1024)
+                
+                if mb_size < 50:  # Likely SD
+                    estimated_minutes = max(3, int(mb_size / 12))
+                elif mb_size < 200:  # Likely HD
+                    estimated_minutes = max(3, int(mb_size / 35))
+                else:  # Likely 4K or very long
+                    estimated_minutes = max(5, int(mb_size / 80))
+                
+                # Cap estimation at reasonable limits
+                return min(estimated_minutes, 180)  # Max 3 hours
+            
+        except Exception as e:
+            logger.debug(f"S3 metadata extraction failed: {str(e)}")
+        
+        return 10
+    
+    def _extract_duration_from_filename(self, video_url):
+        """Extract duration from URL/filename patterns"""
+        try:
+            import re
+            
+            # Common filename patterns
+            patterns = [
+                r'_(\d+)min[_\.]',        # _15min_  or _15min.
+                r'_(\d+)m[_\.]',          # _15m_   or _15m.
+                r'-(\d+)min[_\.-]',       # -15min- or -15min.
+                r'-(\d+)m[_\.-]',         # -15m-   or -15m.
+                r'(\d+)minutes',          # 15minutes
+                r'duration[_-](\d+)',     # duration_15 or duration-15
+                r'(\d+)[_-]minutes',      # 15_minutes or 15-minutes
+                r'runtime[_-](\d+)',      # runtime_15
+                r'length[_-](\d+)',       # length_15
+                r'(\d+)mins',             # 15mins
+                r'(\d{1,3})m(\d{2})s',    # 15m30s format
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, video_url, re.IGNORECASE)
+                if match:
+                    if pattern.endswith(r'(\d{1,3})m(\d{2})s'):  # Handle mm:ss format
+                        minutes = int(match.group(1))
+                        seconds = int(match.group(2))
+                        total_minutes = minutes + (seconds / 60)
+                        if 1 <= total_minutes <= 300:
+                            return int(total_minutes)
+            
+        except Exception as e:
+            logger.debug(f"Filename pattern extraction failed: {str(e)}")
+        
+        return 10
+    
+    def _estimate_duration_from_filesize(self, video_url):
+        """Estimate duration from file size using S3 head request"""
+        try:
+            from core.s3_utils import get_s3_key_and_bucket, is_s3_url
+            from django.conf import settings
+            import boto3
+            
+            if not is_s3_url(video_url):
+                return 10
+            
+            bucket_name, object_key = get_s3_key_and_bucket(video_url)
+            if not bucket_name or not object_key:
+                return 10
+            
+            # Create S3 client
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+                aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+                region_name=settings.AWS_REGION
+            )
+            
+            # Get just the content length
+            response = s3_client.head_object(Bucket=bucket_name, Key=object_key)
+            content_length = response.get('ContentLength', 0)
+            
+            if content_length > 0:
+                mb_size = content_length / (1024 * 1024)
+                
+                # Improved estimation based on common video formats
+                # These are rough estimates and can vary significantly
+                if mb_size < 10:      # Very small file
+                    return max(2, int(mb_size / 2))    # ~2MB per minute
+                elif mb_size < 50:    # Small to medium (likely SD or short HD)
+                    return max(3, int(mb_size / 8))    # ~8MB per minute
+                elif mb_size < 200:   # Medium (likely HD)
+                    return max(5, int(mb_size / 25))   # ~25MB per minute
+                elif mb_size < 500:   # Large (likely long HD or short 4K)
+                    return max(10, int(mb_size / 40))  # ~40MB per minute
+                else:                 # Very large (likely long 4K)
+                    return max(15, int(mb_size / 60))  # ~60MB per minute
+            
+        except Exception as e:
+            logger.debug(f"File size estimation failed: {str(e)}")
+        
+        return 10
 
 
-class EnrollmentListSerializer(serializers.ModelSerializer):
-    """Fast serializer for enrollment lists - minimal course data"""
-    course_id = serializers.IntegerField(source='course.id', read_only=True)
-    course_title = serializers.CharField(source='course.title', read_only=True)
-    course_image = serializers.ImageField(source='course.image', read_only=True)
-    course_category = serializers.CharField(source='course.category.name', read_only=True)
+
+
+# Enhanced enrollment serializer for detailed views
+class EnhancedEnrollmentSerializer(serializers.ModelSerializer):
+    """
+    Enhanced enrollment serializer with all features for detailed views
+    """
+    course = CourseDetailSerializer(read_only=True)
     plan_name = serializers.CharField(source='get_plan_type_display', read_only=True)
-    is_expired = serializers.BooleanField(read_only=True)
+    is_expired = serializers.SerializerMethodField()
+    days_remaining = serializers.SerializerMethodField()
+    total_curriculum = serializers.SerializerMethodField()
+    total_duration = serializers.SerializerMethodField()
+    enrollment_status = serializers.SerializerMethodField()
+    progress_info = serializers.SerializerMethodField()
     
     class Meta:
         model = Enrollment
         fields = [
-            'id', 'course_id', 'course_title', 'course_image', 'course_category',
-            'date_enrolled', 'plan_type', 'plan_name', 'expiry_date', 
-            'amount_paid', 'is_active', 'is_expired'
+            'id', 'course', 'date_enrolled', 'plan_type', 'plan_name',
+            'expiry_date', 'amount_paid', 'is_active', 'is_expired',
+            'days_remaining', 'total_curriculum', 'total_duration',
+            'enrollment_status', 'progress_info'
         ]
+    
+    def get_is_expired(self, obj):
+        """Check if enrollment has expired"""
+        return obj.is_expired
+    
+    def get_days_remaining(self, obj):
+        """Get days remaining with detailed info"""
+        return obj.get_days_remaining()
+    
+    def get_total_curriculum(self, obj):
+        """Get total curriculum count"""
+        try:
+            if hasattr(obj, 'curriculum_count'):
+                return obj.curriculum_count
+            return obj.course.curriculum.count()
+        except Exception:
+            return 0
+    
+    def get_total_duration(self, obj):
+        """Get total duration using the same method as lightweight serializer"""
+        lightweight_serializer = LightweightEnrollmentSerializer()
+        return lightweight_serializer.get_total_duration(obj)
+    
+    def get_enrollment_status(self, obj):
+        """Get detailed enrollment status with color coding"""
+        if not obj.is_active:
+            return {
+                'status': 'inactive',
+                'message': 'Enrollment is inactive',
+                'color': '#ef4444',  # red
+                'icon': 'inactive'
+            }
+        
+        if obj.is_expired:
+            return {
+                'status': 'expired',
+                'message': 'Enrollment has expired',
+                'color': '#ef4444',  # red
+                'icon': 'expired'
+            }
+        
+        if obj.plan_type == 'LIFETIME':
+            return {
+                'status': 'active_lifetime',
+                'message': 'Lifetime access',
+                'color': '#10b981',  # green
+                'icon': 'infinity'
+            }
+        
+        days_remaining = self.get_days_remaining(obj)
+        if days_remaining is None:
+            return {
+                'status': 'active',
+                'message': 'Active enrollment',
+                'color': '#10b981',  # green
+                'icon': 'active'
+            }
+        
+        if days_remaining <= 3:
+            return {
+                'status': 'expiring_urgent',
+                'message': f'Expires in {days_remaining} days - Renew now!',
+                'color': '#ef4444',  # red
+                'icon': 'urgent'
+            }
+        elif days_remaining <= 7:
+            return {
+                'status': 'expiring_soon',
+                'message': f'Expires in {days_remaining} days',
+                'color': '#f59e0b',  # orange
+                'icon': 'warning'
+            }
+        elif days_remaining <= 30:
+            return {
+                'status': 'active_expiring',
+                'message': f'Active - {days_remaining} days remaining',
+                'color': '#3b82f6',  # blue
+                'icon': 'active'
+            }
+        else:
+            return {
+                'status': 'active',
+                'message': f'Active - {days_remaining} days remaining',
+                'color': '#10b981',  # green
+                'icon': 'active'
+            }
+    
+    def get_progress_info(self, obj):
+        """Get progress information (placeholder for future progress tracking)"""
+        return {
+            'completed_items': 0,  # Implement based on your progress tracking
+            'total_items': self.get_total_curriculum(obj),
+            'completion_percentage': 0,  # Calculate based on completed items
+            'last_accessed': None,  # Track when user last accessed the course
+            'estimated_completion_time': self.get_total_duration(obj)  # In minutes
+        }
