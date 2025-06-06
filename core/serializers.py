@@ -1282,31 +1282,52 @@ class StudentEnrollmentDetailSerializer(serializers.ModelSerializer):
         }
 
 class LightweightCourseSerializer(serializers.ModelSerializer):
-    """Minimal course data for enrollment lists - NO nested queries"""
+    """Minimal course data for enrollment lists with presigned video URLs"""
     category_name = serializers.CharField(source='category.name', read_only=True)
     curriculum_count = serializers.SerializerMethodField()
+    curriculum = serializers.SerializerMethodField()  # Add curriculum with presigned URLs
     
     class Meta:
         model = Course
         fields = [
-            'id', 'title', 'image', 'small_desc', 'category_name', 'curriculum_count'
+            'id', 'title', 'image', 'small_desc', 'category_name', 
+            'curriculum_count', 'curriculum'
         ]
         
     def get_curriculum_count(self, obj):
         """Get curriculum count efficiently"""
         try:
-            # Use annotated value if available (fastest)
             if hasattr(obj, 'curriculum_count'):
                 return obj.curriculum_count
             
-            # Use prefetched data if available
             if hasattr(obj, 'prefetched_objects_cache') and 'curriculum' in obj.prefetched_objects_cache:
                 return len(obj.prefetched_objects_cache['curriculum'])
             
-            # Fallback
             return obj.curriculum.count()
         except Exception:
             return 0
+    
+    def get_curriculum(self, obj):
+        """Get curriculum with presigned URLs"""
+        try:
+            # Use prefetched data if available
+            if hasattr(obj, 'prefetched_objects_cache') and 'curriculum' in obj.prefetched_objects_cache:
+                curriculum_items = obj.prefetched_objects_cache['curriculum']
+            else:
+                curriculum_items = obj.curriculum.all()
+            
+            # Serialize with presigned URLs
+            serializer = LightweightCourseCurriculumSerializer(
+                curriculum_items, 
+                many=True, 
+                context=self.context
+            )
+            return serializer.data
+            
+        except Exception as e:
+            logger.error(f"Error getting curriculum for course {obj.id}: {str(e)}")
+            return []
+
 
                             
 class LightweightEnrollmentSerializer(serializers.ModelSerializer):
