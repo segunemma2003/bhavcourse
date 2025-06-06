@@ -11,7 +11,16 @@ from core.s3_utils import generate_presigned_url, is_s3_url
 from django.core.cache import cache
 from django.conf import settings
 from django.db.models import Q, Prefetch
-
+# Add or modify the following in core/views.py
+from rest_framework import viewsets, status, parsers
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated, IsAdminUser
+from rest_framework.decorators import action
+from django.db import transaction
+from .models import Course, CourseObjective, CourseRequirement, CourseCurriculum, Category
+from .serializers import CourseCreateUpdateSerializer, CourseDetailSerializer, CourseListSerializer
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
 from core.func import performance_monitor
 from core.permissions import IsEnrolledOrAdmin
 from core.s3_utils import is_s3_url
@@ -126,17 +135,7 @@ class CategoryViewSet(viewsets.ModelViewSet):
             return [permissions.AllowAny()]
         return super().get_permissions()
 
-# Add or modify the following in core/views.py
 
-from rest_framework import viewsets, status, parsers
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, IsAdminUser
-from rest_framework.decorators import action
-from django.db import transaction
-from .models import Course, CourseObjective, CourseRequirement, CourseCurriculum, Category
-from .serializers import CourseCreateUpdateSerializer, CourseDetailSerializer, CourseListSerializer
-from drf_yasg.utils import swagger_auto_schema
-from drf_yasg import openapi
 
 class CourseViewSet(viewsets.ModelViewSet):
     """
@@ -1033,14 +1032,11 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
             )
     
     def retrieve(self, request, *args, **kwargs):
-        """FIXED: Retrieve with fresh presigned URLs"""
+        """Retrieve with GUARANTEED fresh presigned URLs"""
         try:
             enrollment_id = kwargs.get('pk')
             
-            # Don't cache detail views with video URLs - they need fresh presigned URLs
-            logger.info(f"Retrieving enrollment detail {enrollment_id} with fresh URLs")
-            
-            # Get enrollment with optimized query
+            # Get enrollment
             enrollment = self.get_queryset().filter(id=enrollment_id).first()
             if not enrollment:
                 return Response(
@@ -1048,17 +1044,43 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_404_NOT_FOUND
                 )
             
-            # Use a special serializer that forces fresh presigned URLs
-            serializer = self.get_fresh_serializer(enrollment, context={'request': request})
-            response_data = serializer.data
+            # FORCE FRESH URLS by modifying the video URLs directly
+            course = enrollment.course
             
-            # Log to debug
-            logger.info(f"Retrieved enrollment {enrollment_id} for user {request.user.id}")
+            # Get all curriculum items and force fresh presigned URLs
+            for curriculum_item in course.curriculum.all():
+                if curriculum_item.video_url and is_s3_url(curriculum_item.video_url):
+                    # Generate fresh presigned URL directly
+                    fresh_url = generate_presigned_url(
+                        curriculum_item.video_url, 
+                        expiration=43200,  # 12 hours
+                        force_fresh=True   # Force fresh generation
+                    )
+                    # Temporarily store the fresh URL (don't save to DB)
+                    curriculum_item._fresh_video_url = fresh_url
             
-            return Response(response_data)
+            # Use modified serializer
+            class FreshEnrollmentSerializer(EnrollmentSerializer):
+                class FreshCourseDetailSerializer(CourseDetailSerializer):
+                    class FreshCourseCurriculumSerializer(CourseCurriculumSerializer):
+                        def get_video_url(self, obj):
+                            # Use the fresh URL we generated above
+                            if hasattr(obj, '_fresh_video_url'):
+                                return obj._fresh_video_url
+                            return super().get_video_url(obj)
+                    
+                    curriculum = FreshCourseCurriculumSerializer(many=True, read_only=True)
+                
+                course = FreshCourseDetailSerializer(read_only=True)
+            
+            serializer = FreshEnrollmentSerializer(enrollment, context={'request': request})
+            
+            logger.info(f"Retrieved enrollment {enrollment_id} with FORCED fresh URLs")
+            
+            return Response(serializer.data)
             
         except Exception as e:
-            logger.error(f"Error in enrollment retrieve view: {str(e)}")
+            logger.error(f"Error in enrollment retrieve: {str(e)}")
             return Response(
                 {"error": "Failed to fetch enrollment details", "detail": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
