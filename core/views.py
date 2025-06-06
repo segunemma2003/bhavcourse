@@ -13,6 +13,7 @@ from django.db.models import Q, Prefetch
 
 from core.func import performance_monitor
 from core.permissions import IsEnrolledOrAdmin
+from core.s3_utils import is_s3_url
 from .services import RazorpayService,  process_course_purchase
 from .tasks import send_push_notification
 from django.db import transaction
