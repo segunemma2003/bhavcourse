@@ -1560,7 +1560,7 @@ class LightweightEnrollmentSerializer(serializers.ModelSerializer):
 
 
 # Enhanced enrollment serializer for detailed views
-class EnhancedEnrollmentSerializer(serializers.ModelSerializer):
+class EnrollmentListSerializer(serializers.ModelSerializer):
     """
     Enhanced enrollment serializer with all features for detailed views
     """
