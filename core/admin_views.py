@@ -29,6 +29,434 @@ import logging
 logger = logging.getLogger(__name__)
 User = get_user_model()
 
+
+
+class AdminAllStudentsView(generics.ListAPIView):
+    """
+    Admin API endpoint for retrieving ALL students (both enrolled and not enrolled) with their enrollment information.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsAdminUser]
+
+# Add this import to the top of your urls.py file:
+# from core.admin_views import AdminAllStudentsView
+
+# Add this URL pattern to your urlpatterns list:
+# path('admin/all-students/', AdminAllStudentsView.as_view(), name='admin-all-students'),
+    
+    @swagger_auto_schema(
+        operation_summary="Admin: Get all students with enrollment status",
+        operation_description="""
+        Admin-only endpoint to get a comprehensive list of ALL students (both enrolled and not enrolled).
+        
+        **Returns detailed information including:**
+        - Student basic information (email, name, phone, etc.)
+        - Enrollment statistics for each student
+        - Registration date and activity status
+        - Total amount spent per student
+        - Last enrollment date if applicable
+        - Quick enrollment status overview
+        
+        **Use Cases:**
+        - View all students in the system
+        - Identify students who haven't enrolled yet
+        - Monitor student activity and spending
+        - Bulk enrollment operations
+        - Marketing and outreach to non-enrolled students
+        """,
+        manual_parameters=[
+            openapi.Parameter(
+                'search', 
+                openapi.IN_QUERY, 
+                description="Search students by email, name, or phone", 
+                type=openapi.TYPE_STRING
+            ),
+            openapi.Parameter(
+                'enrollment_status', 
+                openapi.IN_QUERY, 
+                description="Filter by enrollment status (enrolled, not_enrolled, active_enrolled, expired_enrolled)", 
+                type=openapi.TYPE_STRING
+            ),
+            openapi.Parameter(
+                'is_active', 
+                openapi.IN_QUERY, 
+                description="Filter by account active status (true/false)", 
+                type=openapi.TYPE_BOOLEAN
+            ),
+            openapi.Parameter(
+                'date_joined_after', 
+                openapi.IN_QUERY, 
+                description="Filter students who joined after this date (YYYY-MM-DD)", 
+                type=openapi.TYPE_STRING,
+                format=openapi.FORMAT_DATE
+            ),
+            openapi.Parameter(
+                'date_joined_before', 
+                openapi.IN_QUERY, 
+                description="Filter students who joined before this date (YYYY-MM-DD)", 
+                type=openapi.TYPE_STRING,
+                format=openapi.FORMAT_DATE
+            ),
+            openapi.Parameter(
+                'min_spent', 
+                openapi.IN_QUERY, 
+                description="Filter students who spent minimum amount", 
+                type=openapi.TYPE_NUMBER
+            ),
+            openapi.Parameter(
+                'ordering', 
+                openapi.IN_QUERY, 
+                description="Order by field (date_joined, total_spent, enrollment_count, -date_joined, -total_spent, -enrollment_count)", 
+                type=openapi.TYPE_STRING
+            ),
+        ],
+        responses={
+            status.HTTP_200_OK: openapi.Response(
+                description="Students list with enrollment information",
+                examples={
+                    "application/json": {
+                        "count": 150,
+                        "next": "http://example.com/api/admin/all-students/?page=2",
+                        "previous": None,
+                        "results": [
+                            {
+                                "student": {
+                                    "id": 123,
+                                    "email": "student1@example.com",
+                                    "full_name": "John Doe",
+                                    "phone_number": "+1234567890",
+                                    "date_of_birth": "1995-01-15",
+                                    "is_active": True,
+                                    "date_joined": "2024-12-01T10:30:00Z",
+                                    "profile_picture_url": "https://example.com/profile.jpg"
+                                },
+                                "enrollment_info": {
+                                    "is_enrolled": True,
+                                    "total_enrollments": 3,
+                                    "active_enrollments": 2,
+                                    "expired_enrollments": 1,
+                                    "total_spent": "599.00",
+                                    "last_enrollment_date": "2025-01-15T10:30:00Z",
+                                    "enrollment_status": "active_enrolled",
+                                    "status_message": "Has 2 active enrollments"
+                                },
+                                "quick_stats": {
+                                    "days_since_joined": 40,
+                                    "days_since_last_enrollment": 5,
+                                    "average_spent_per_course": "199.67",
+                                    "is_recent_student": True
+                                }
+                            },
+                            {
+                                "student": {
+                                    "id": 124,
+                                    "email": "newstudent@example.com",
+                                    "full_name": "Jane Smith",
+                                    "phone_number": "+1234567891",
+                                    "date_of_birth": "1998-03-20",
+                                    "is_active": True,
+                                    "date_joined": "2025-01-10T14:20:00Z",
+                                    "profile_picture_url": None
+                                },
+                                "enrollment_info": {
+                                    "is_enrolled": False,
+                                    "total_enrollments": 0,
+                                    "active_enrollments": 0,
+                                    "expired_enrollments": 0,
+                                    "total_spent": "0.00",
+                                    "last_enrollment_date": None,
+                                    "enrollment_status": "not_enrolled",
+                                    "status_message": "No enrollments yet"
+                                },
+                                "quick_stats": {
+                                    "days_since_joined": 10,
+                                    "days_since_last_enrollment": None,
+                                    "average_spent_per_course": "0.00",
+                                    "is_recent_student": True
+                                }
+                            }
+                        ]
+                    }
+                },
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'count': openapi.Schema(type=openapi.TYPE_INTEGER),
+                        'next': openapi.Schema(type=openapi.TYPE_STRING),
+                        'previous': openapi.Schema(type=openapi.TYPE_STRING),
+                        'results': openapi.Schema(
+                            type=openapi.TYPE_ARRAY,
+                            items=openapi.Schema(
+                                type=openapi.TYPE_OBJECT,
+                                properties={
+                                    'student': openapi.Schema(
+                                        type=openapi.TYPE_OBJECT,
+                                        properties={
+                                            'id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                            'email': openapi.Schema(type=openapi.TYPE_STRING),
+                                            'full_name': openapi.Schema(type=openapi.TYPE_STRING),
+                                            'phone_number': openapi.Schema(type=openapi.TYPE_STRING),
+                                            'date_of_birth': openapi.Schema(type=openapi.TYPE_STRING),
+                                            'is_active': openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                                            'date_joined': openapi.Schema(type=openapi.TYPE_STRING),
+                                            'profile_picture_url': openapi.Schema(type=openapi.TYPE_STRING)
+                                        }
+                                    ),
+                                    'enrollment_info': openapi.Schema(
+                                        type=openapi.TYPE_OBJECT,
+                                        properties={
+                                            'is_enrolled': openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                                            'total_enrollments': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                            'active_enrollments': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                            'expired_enrollments': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                            'total_spent': openapi.Schema(type=openapi.TYPE_STRING),
+                                            'last_enrollment_date': openapi.Schema(type=openapi.TYPE_STRING),
+                                            'enrollment_status': openapi.Schema(type=openapi.TYPE_STRING),
+                                            'status_message': openapi.Schema(type=openapi.TYPE_STRING)
+                                        }
+                                    ),
+                                    'quick_stats': openapi.Schema(
+                                        type=openapi.TYPE_OBJECT,
+                                        properties={
+                                            'days_since_joined': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                            'days_since_last_enrollment': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                            'average_spent_per_course': openapi.Schema(type=openapi.TYPE_STRING),
+                                            'is_recent_student': openapi.Schema(type=openapi.TYPE_BOOLEAN)
+                                        }
+                                    )
+                                }
+                            )
+                        )
+                    }
+                )
+            ),
+            status.HTTP_403_FORBIDDEN: openapi.Response(
+                description="Admin access required",
+                examples={
+                    "application/json": {
+                        "detail": "You do not have permission to perform this action."
+                    }
+                }
+            )
+        }
+    )
+    def get(self, request, *args, **kwargs):
+        # Get query parameters
+        search = request.query_params.get('search')
+        enrollment_status = request.query_params.get('enrollment_status')
+        is_active = request.query_params.get('is_active')
+        date_joined_after = request.query_params.get('date_joined_after')
+        date_joined_before = request.query_params.get('date_joined_before')
+        min_spent = request.query_params.get('min_spent')
+        ordering = request.query_params.get('ordering', '-date_joined')
+        
+        # Base query for all students (non-staff users)
+        students_query = User.objects.filter(
+            is_staff=False,
+            is_superuser=False
+        )
+        
+        # Apply search filter
+        if search:
+            students_query = students_query.filter(
+                Q(email__icontains=search) |
+                Q(full_name__icontains=search) |
+                Q(phone_number__icontains=search)
+            )
+        
+        # Apply active status filter
+        if is_active is not None:
+            is_active_bool = is_active.lower() == 'true'
+            students_query = students_query.filter(is_active=is_active_bool)
+        
+        # Apply date filters
+        if date_joined_after:
+            try:
+                from datetime import datetime
+                date_after = datetime.strptime(date_joined_after, '%Y-%m-%d').date()
+                students_query = students_query.filter(date_joined__date__gte=date_after)
+            except ValueError:
+                pass  # Ignore invalid date format
+        
+        if date_joined_before:
+            try:
+                from datetime import datetime
+                date_before = datetime.strptime(date_joined_before, '%Y-%m-%d').date()
+                students_query = students_query.filter(date_joined__date__lte=date_before)
+            except ValueError:
+                pass  # Ignore invalid date format
+        
+        # Prefetch enrollments for efficient querying
+        students_query = students_query.prefetch_related(
+            Prefetch(
+                'enrollments',
+                queryset=Enrollment.objects.select_related('course')
+            )
+        )
+        
+        # Get all students
+        students = list(students_query)
+        
+        # Calculate stats for each student and apply additional filters
+        students_with_info = []
+        for student in students:
+            enrollment_info = self._calculate_enrollment_info(student)
+            quick_stats = self._calculate_quick_stats(student, enrollment_info)
+            
+            # Apply enrollment status filter
+            if enrollment_status:
+                if enrollment_status == 'enrolled' and not enrollment_info['is_enrolled']:
+                    continue
+                elif enrollment_status == 'not_enrolled' and enrollment_info['is_enrolled']:
+                    continue
+                elif enrollment_status == 'active_enrolled' and enrollment_info['enrollment_status'] != 'active_enrolled':
+                    continue
+                elif enrollment_status == 'expired_enrolled' and enrollment_info['enrollment_status'] != 'expired_enrolled':
+                    continue
+            
+            # Apply minimum spent filter
+            if min_spent:
+                try:
+                    min_spent_float = float(min_spent)
+                    if float(enrollment_info['total_spent']) < min_spent_float:
+                        continue
+                except ValueError:
+                    pass
+            
+            students_with_info.append({
+                'student': UserDetailsSerializer(student).data,
+                'enrollment_info': enrollment_info,
+                'quick_stats': quick_stats,
+                # Add sortable fields for ordering
+                '_total_spent_numeric': float(enrollment_info['total_spent']),
+                '_enrollment_count_numeric': enrollment_info['total_enrollments'],
+                '_date_joined': student.date_joined
+            })
+        
+        # Apply ordering
+        if ordering:
+            reverse = ordering.startswith('-')
+            field = ordering.lstrip('-')
+            
+            if field == 'total_spent':
+                students_with_info.sort(key=lambda x: x['_total_spent_numeric'], reverse=reverse)
+            elif field == 'enrollment_count':
+                students_with_info.sort(key=lambda x: x['_enrollment_count_numeric'], reverse=reverse)
+            elif field == 'date_joined':
+                students_with_info.sort(key=lambda x: x['_date_joined'], reverse=reverse)
+            else:
+                # Default ordering by date_joined (newest first)
+                students_with_info.sort(key=lambda x: x['_date_joined'], reverse=True)
+        
+        # Remove helper fields before pagination
+        for student_info in students_with_info:
+            student_info.pop('_total_spent_numeric', None)
+            student_info.pop('_enrollment_count_numeric', None)
+            student_info.pop('_date_joined', None)
+        
+        # Manual pagination
+        from django.core.paginator import Paginator
+        paginator = Paginator(students_with_info, 25)  # 25 students per page
+        page_number = request.query_params.get('page', 1)
+        page_obj = paginator.get_page(page_number)
+        
+        # Build response with pagination
+        response_data = {
+            'count': paginator.count,
+            'next': None,
+            'previous': None,
+            'results': page_obj.object_list
+        }
+        
+        # Add pagination URLs
+        if page_obj.has_next():
+            next_url = request.build_absolute_uri()
+            if '?' in next_url:
+                next_url += f"&page={page_obj.next_page_number()}"
+            else:
+                next_url += f"?page={page_obj.next_page_number()}"
+            response_data['next'] = next_url
+            
+        if page_obj.has_previous():
+            prev_url = request.build_absolute_uri()
+            if '?' in prev_url:
+                prev_url += f"&page={page_obj.previous_page_number()}"
+            else:
+                prev_url += f"?page={page_obj.previous_page_number()}"
+            response_data['previous'] = prev_url
+        
+        return Response(response_data, status=status.HTTP_200_OK)
+    
+    def _calculate_enrollment_info(self, student):
+        """Calculate enrollment information for a student"""
+        enrollments = list(student.enrollments.all())
+        
+        total_enrollments = len(enrollments)
+        active_enrollments = 0
+        expired_enrollments = 0
+        total_spent = 0
+        last_enrollment_date = None
+        
+        for enrollment in enrollments:
+            total_spent += float(enrollment.amount_paid)
+            
+            if enrollment.is_active and not enrollment.is_expired:
+                active_enrollments += 1
+            else:
+                expired_enrollments += 1
+            
+            if last_enrollment_date is None or enrollment.date_enrolled > last_enrollment_date:
+                last_enrollment_date = enrollment.date_enrolled
+        
+        # Determine enrollment status
+        if total_enrollments == 0:
+            enrollment_status = 'not_enrolled'
+            status_message = 'No enrollments yet'
+        elif active_enrollments > 0:
+            enrollment_status = 'active_enrolled'
+            status_message = f'Has {active_enrollments} active enrollment{"s" if active_enrollments > 1 else ""}'
+        elif expired_enrollments > 0:
+            enrollment_status = 'expired_enrolled'
+            status_message = f'All {expired_enrollments} enrollment{"s" if expired_enrollments > 1 else ""} expired'
+        else:
+            enrollment_status = 'inactive_enrolled'
+            status_message = 'Has inactive enrollments'
+        
+        return {
+            'is_enrolled': total_enrollments > 0,
+            'total_enrollments': total_enrollments,
+            'active_enrollments': active_enrollments,
+            'expired_enrollments': expired_enrollments,
+            'total_spent': f"{total_spent:.2f}",
+            'last_enrollment_date': last_enrollment_date,
+            'enrollment_status': enrollment_status,
+            'status_message': status_message
+        }
+    
+    def _calculate_quick_stats(self, student, enrollment_info):
+        """Calculate quick statistics for a student"""
+        from django.utils import timezone
+        
+        now = timezone.now()
+        days_since_joined = (now - student.date_joined).days
+        
+        days_since_last_enrollment = None
+        if enrollment_info['last_enrollment_date']:
+            days_since_last_enrollment = (now - enrollment_info['last_enrollment_date']).days
+        
+        # Calculate average spent per course
+        total_spent = float(enrollment_info['total_spent'])
+        total_enrollments = enrollment_info['total_enrollments']
+        average_spent_per_course = total_spent / total_enrollments if total_enrollments > 0 else 0
+        
+        # Determine if student is recent (joined within last 30 days)
+        is_recent_student = days_since_joined <= 30
+        
+        return {
+            'days_since_joined': days_since_joined,
+            'days_since_last_enrollment': days_since_last_enrollment,
+            'average_spent_per_course': f"{average_spent_per_course:.2f}",
+            'is_recent_student': is_recent_student
+        }
 class AdminMetricsView(generics.GenericAPIView):
     """
     API endpoint for retrieving admin dashboard metrics.
