@@ -4,7 +4,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from core.admin_views import (
     AdminAddStudentToPlanView, AdminAllStudentsEnrollmentsView, 
-    AdminAllStudentsView, AdminBulkEnrollmentOperationsView, 
+    AdminAllStudentsView, AdminBulkDeleteUsersView, AdminBulkEnrollmentOperationsView, AdminDeleteUserAccountView, 
     AdminMetricsView, AdminRemoveStudentFromPlanView, 
     AdminStudentEnrollmentsView, ContentPageViewSet, 
     EnrolledStudentsListView, GeneralSettingsView, 
@@ -70,6 +70,13 @@ urlpatterns = [
     path('admin/students-enrollments-overview/', 
          AdminAllStudentsEnrollmentsView.as_view(), 
          name='admin-students-enrollments-overview'),
+    path('account/delete/<int:user_id>/', 
+         AdminDeleteUserAccountView.as_view(), 
+         name='admin-delete-user-account'),
+    
+    path('admin/bulk-delete-users/', 
+         AdminBulkDeleteUsersView.as_view(), 
+         name='admin-bulk-delete-users'),
     
     # Settings and content
     path('settings/', GeneralSettingsView.as_view(), name='general-settings'),

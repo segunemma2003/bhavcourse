@@ -8,7 +8,7 @@ from django.utils import timezone
 from django.db import transaction
 from datetime import timedelta, datetime
 from django.db.models.functions import TruncDate, TruncWeek, TruncMonth
-from .models import Course, CoursePlanType, Notification, PaymentCard, PaymentOrder, User, Purchase, ContentPage, GeneralSettings
+from .models import Course, CoursePlanType, FCMDevice, Notification, PaymentCard, PaymentOrder, User, Purchase, ContentPage, GeneralSettings, UserSubscription, Wishlist
 from .serializers import (
     AdminMetricsSerializer, ContentPageSerializer, 
     GeneralSettingsSerializer, CourseListSerializer, StudentEnrollmentDetailSerializer
@@ -31,6 +31,481 @@ User = get_user_model()
 
 
 
+
+
+class AdminDeleteUserAccountView(generics.DestroyAPIView):
+    """
+    Admin API endpoint for deleting any user account by ID.
+    This permanently deletes the user and all associated data.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsAdminUser]
+    
+    @swagger_auto_schema(
+        operation_summary="Admin: Delete user account",
+        operation_description="""
+        Admin-only endpoint to permanently delete any user account by ID.
+        
+        **This action:**
+        1. Permanently deletes the user account
+        2. Deactivates all enrollments
+        3. Marks all purchases as cancelled
+        4. Removes payment cards
+        5. Deletes notifications
+        6. Removes FCM devices
+        7. Clears wishlist items
+        8. Creates audit log entry
+        
+        **WARNING: This action is IRREVERSIBLE!**
+        
+        **Use Cases:**
+        - GDPR/Privacy compliance requests
+        - Remove spam or fraudulent accounts
+        - Clean up test accounts
+        - Handle account termination requests
+        """,
+        manual_parameters=[
+            openapi.Parameter(
+                'user_id',
+                openapi.IN_PATH,
+                description="ID of the user account to delete",
+                type=openapi.TYPE_INTEGER,
+                required=True
+            ),
+        ],
+        responses={
+            status.HTTP_200_OK: openapi.Response(
+                description="User account deleted successfully",
+                examples={
+                    "application/json": {
+                        "success": True,
+                        "data": {
+                            "message": "User account deleted successfully",
+                            "deleted_user": {
+                                "id": 37,
+                                "email": "user@example.com",
+                                "full_name": "John Doe",
+                                "date_joined": "2024-12-01T10:30:00Z"
+                            },
+                            "cleanup_summary": {
+                                "enrollments_deactivated": 3,
+                                "purchases_cancelled": 2,
+                                "payment_cards_removed": 1,
+                                "notifications_deleted": 15,
+                                "wishlist_items_removed": 5,
+                                "fcm_devices_removed": 2
+                            },
+                            "deleted_by": "admin@example.com",
+                            "deletion_timestamp": "2025-01-20T14:30:00Z"
+                        }
+                    }
+                },
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'success': openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                        'data': openapi.Schema(
+                            type=openapi.TYPE_OBJECT,
+                            properties={
+                                'message': openapi.Schema(type=openapi.TYPE_STRING),
+                                'deleted_user': openapi.Schema(
+                                    type=openapi.TYPE_OBJECT,
+                                    properties={
+                                        'id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                        'email': openapi.Schema(type=openapi.TYPE_STRING),
+                                        'full_name': openapi.Schema(type=openapi.TYPE_STRING),
+                                        'date_joined': openapi.Schema(type=openapi.TYPE_STRING)
+                                    }
+                                ),
+                                'cleanup_summary': openapi.Schema(
+                                    type=openapi.TYPE_OBJECT,
+                                    properties={
+                                        'enrollments_deactivated': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                        'purchases_cancelled': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                        'payment_cards_removed': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                        'notifications_deleted': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                        'wishlist_items_removed': openapi.Schema(type=openapi.TYPE_INTEGER),
+                                        'fcm_devices_removed': openapi.Schema(type=openapi.TYPE_INTEGER)
+                                    }
+                                ),
+                                'deleted_by': openapi.Schema(type=openapi.TYPE_STRING),
+                                'deletion_timestamp': openapi.Schema(type=openapi.TYPE_STRING)
+                            }
+                        )
+                    }
+                )
+            ),
+            status.HTTP_404_NOT_FOUND: openapi.Response(
+                description="User not found",
+                examples={
+                    "application/json": {
+                        "error": "User not found",
+                        "details": "No user found with ID 37"
+                    }
+                }
+            ),
+            status.HTTP_400_BAD_REQUEST: openapi.Response(
+                description="Cannot delete admin user",
+                examples={
+                    "application/json": {
+                        "error": "Cannot delete admin user",
+                        "details": "Admin users cannot be deleted through this endpoint"
+                    }
+                }
+            ),
+            status.HTTP_403_FORBIDDEN: openapi.Response(
+                description="Admin access required",
+                examples={
+                    "application/json": {
+                        "detail": "You do not have permission to perform this action."
+                    }
+                }
+            )
+        }
+    )
+    def delete(self, request, user_id, *args, **kwargs):
+        try:
+            # Get the user to delete
+            user_to_delete = User.objects.get(pk=user_id)
+            
+            # Prevent deletion of admin users
+            if user_to_delete.is_staff or user_to_delete.is_superuser:
+                return Response(
+                    {
+                        'error': 'Cannot delete admin user',
+                        'details': 'Admin users cannot be deleted through this endpoint'
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Prevent admin from deleting themselves
+            if user_to_delete.id == request.user.id:
+                return Response(
+                    {
+                        'error': 'Cannot delete own account',
+                        'details': 'Admins cannot delete their own account through this endpoint'
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Store user info before deletion
+            user_info = {
+                'id': user_to_delete.id,
+                'email': user_to_delete.email,
+                'full_name': user_to_delete.full_name,
+                'date_joined': user_to_delete.date_joined
+            }
+            
+            # Perform cleanup and get summary
+            with transaction.atomic():
+                cleanup_summary = self._cleanup_user_data(user_to_delete)
+                
+                # Create audit log before deletion
+                self._create_audit_log(request.user, user_to_delete, cleanup_summary)
+                
+                # Delete the user (this will cascade to related objects)
+                user_to_delete.delete()
+            
+            # Clear any cached data for this user
+            self._clear_user_cache(user_id)
+            
+            # Prepare response
+            response_data = {
+                'message': f'User account for {user_info["email"]} deleted successfully',
+                'deleted_user': user_info,
+                'cleanup_summary': cleanup_summary,
+                'deleted_by': request.user.email,
+                'deletion_timestamp': timezone.now()
+            }
+            
+            return Response({"success": True, "data": response_data}, status=status.HTTP_200_OK)
+            
+        except User.DoesNotExist:
+            return Response(
+                {
+                    'error': 'User not found',
+                    'details': f'No user found with ID {user_id}'
+                },
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            logger.error(f"Admin user deletion failed for user {user_id}: {str(e)}")
+            return Response(
+                {
+                    'error': 'Deletion failed',
+                    'details': str(e)
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    def _cleanup_user_data(self, user):
+        """
+        Clean up all user-related data and return summary
+        """
+        cleanup_summary = {
+            'enrollments_deactivated': 0,
+            'purchases_cancelled': 0,
+            'payment_cards_removed': 0,
+            'notifications_deleted': 0,
+            'wishlist_items_removed': 0,
+            'fcm_devices_removed': 0
+        }
+        
+        try:
+            # 1. Deactivate enrollments instead of deleting (for audit purposes)
+            enrollments = Enrollment.objects.filter(user=user)
+            enrollments_count = enrollments.count()
+            enrollments.update(is_active=False)
+            cleanup_summary['enrollments_deactivated'] = enrollments_count
+            
+            # 2. Mark purchases as cancelled
+            purchases = Purchase.objects.filter(user=user)
+            purchases_count = purchases.count()
+            purchases.update(payment_status='CANCELLED')
+            cleanup_summary['purchases_cancelled'] = purchases_count
+            
+            # 3. Remove payment cards
+            payment_cards = PaymentCard.objects.filter(user=user)
+            cleanup_summary['payment_cards_removed'] = payment_cards.count()
+            payment_cards.delete()
+            
+            # 4. Delete notifications
+            notifications = Notification.objects.filter(user=user)
+            cleanup_summary['notifications_deleted'] = notifications.count()
+            notifications.delete()
+            
+            # 5. Remove wishlist items
+            wishlist_items = Wishlist.objects.filter(user=user)
+            cleanup_summary['wishlist_items_removed'] = wishlist_items.count()
+            wishlist_items.delete()
+            
+            # 6. Remove FCM devices
+            fcm_devices = FCMDevice.objects.filter(user=user)
+            cleanup_summary['fcm_devices_removed'] = fcm_devices.count()
+            fcm_devices.delete()
+            
+            # 7. Mark payment orders as cancelled
+            payment_orders = PaymentOrder.objects.filter(user=user)
+            payment_orders.update(status='CANCELLED')
+            
+            # 8. Deactivate user subscriptions
+            user_subscriptions = UserSubscription.objects.filter(user=user)
+            user_subscriptions.update(is_active=False)
+            
+        except Exception as e:
+            logger.error(f"Error during user data cleanup: {str(e)}")
+            raise
+        
+        return cleanup_summary
+    
+    def _create_audit_log(self, admin_user, deleted_user, cleanup_summary):
+        """
+        Create audit log entry for account deletion
+        """
+        try:
+            # Create a notification for the admin as audit trail
+            Notification.objects.create(
+                user=admin_user,
+                title="User Account Deleted",
+                message=f"Admin {admin_user.email} deleted user account: {deleted_user.email} (ID: {deleted_user.id}). "
+                       f"Cleanup: {cleanup_summary['enrollments_deactivated']} enrollments deactivated, "
+                       f"{cleanup_summary['purchases_cancelled']} purchases cancelled.",
+                notification_type='SYSTEM'
+            )
+            
+            # Log the action
+            logger.info(f"User account deleted - Admin: {admin_user.email}, "
+                       f"Deleted User: {deleted_user.email} (ID: {deleted_user.id}), "
+                       f"Cleanup Summary: {cleanup_summary}")
+            
+        except Exception as e:
+            logger.error(f"Failed to create audit log: {str(e)}")
+    
+    def _clear_user_cache(self, user_id):
+        """Clear all cached data for the deleted user"""
+        try:
+            # Clear enrollment cache
+            for page in range(1, 6):
+                for page_size in [10, 20, 50]:
+                    key_string = f"enrollments_{user_id}_{page}_{page_size}"
+                    cache_key = hashlib.md5(key_string.encode()).hexdigest()
+                    cache.delete(cache_key)
+            
+            # Clear other user-specific caches
+            cache_patterns = [
+                f"user_profile_{user_id}",
+                f"user_enrollments_{user_id}",
+                f"user_notifications_{user_id}",
+                f"user_wishlist_{user_id}"
+            ]
+            
+            for pattern in cache_patterns:
+                cache.delete(pattern)
+                
+        except Exception as e:
+            logger.warning(f"Failed to clear cache for user {user_id}: {str(e)}")
+
+
+# Also create a bulk delete endpoint for multiple users
+class AdminBulkDeleteUsersView(generics.CreateAPIView):
+    """
+    Admin API endpoint for bulk deletion of multiple user accounts.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsAdminUser]
+    
+    class InputSerializer(serializers.Serializer):
+        user_ids = serializers.ListField(
+            child=serializers.IntegerField(),
+            min_length=1,
+            max_length=50,  # Limit to prevent abuse
+            help_text="List of user IDs to delete"
+        )
+        confirm_deletion = serializers.BooleanField(
+            default=False,
+            help_text="Must be set to true to confirm bulk deletion"
+        )
+        
+        class Meta:
+            ref_name = "AdminBulkDeleteUsersInputSerializer"
+        
+        def validate_confirm_deletion(self, value):
+            if not value:
+                raise serializers.ValidationError("Must confirm deletion by setting this to true")
+            return value
+    
+    def get_serializer_class(self):
+        return self.InputSerializer
+    
+    @swagger_auto_schema(
+        operation_summary="Admin: Bulk delete user accounts",
+        operation_description="""
+        Admin-only endpoint for bulk deletion of multiple user accounts.
+        
+        **WARNING: This action is IRREVERSIBLE!**
+        
+        **Safety Features:**
+        - Limited to 50 users per request
+        - Requires explicit confirmation
+        - Skips admin users automatically
+        - Provides detailed results for each deletion
+        """,
+        request_body=InputSerializer,
+        responses={
+            status.HTTP_200_OK: openapi.Response(
+                description="Bulk deletion completed",
+                examples={
+                    "application/json": {
+                        "success": True,
+                        "data": {
+                            "total_requested": 3,
+                            "successfully_deleted": 2,
+                            "failed_deletions": 1,
+                            "results": [
+                                {
+                                    "user_id": 37,
+                                    "status": "success",
+                                    "email": "user1@example.com",
+                                    "message": "User deleted successfully"
+                                },
+                                {
+                                    "user_id": 38,
+                                    "status": "success", 
+                                    "email": "user2@example.com",
+                                    "message": "User deleted successfully"
+                                },
+                                {
+                                    "user_id": 39,
+                                    "status": "error",
+                                    "message": "User not found"
+                                }
+                            ]
+                        }
+                    }
+                }
+            )
+        }
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        user_ids = serializer.validated_data['user_ids']
+        
+        results = []
+        successfully_deleted = 0
+        failed_deletions = 0
+        
+        for user_id in user_ids:
+            try:
+                user_to_delete = User.objects.get(pk=user_id)
+                
+                # Skip admin users
+                if user_to_delete.is_staff or user_to_delete.is_superuser:
+                    results.append({
+                        'user_id': user_id,
+                        'status': 'skipped',
+                        'email': user_to_delete.email,
+                        'message': 'Admin user - skipped for safety'
+                    })
+                    failed_deletions += 1
+                    continue
+                
+                # Skip if trying to delete self
+                if user_to_delete.id == request.user.id:
+                    results.append({
+                        'user_id': user_id,
+                        'status': 'skipped',
+                        'email': user_to_delete.email,
+                        'message': 'Cannot delete own account'
+                    })
+                    failed_deletions += 1
+                    continue
+                
+                # Perform deletion
+                with transaction.atomic():
+                    email = user_to_delete.email
+                    cleanup_summary = self._cleanup_user_data(user_to_delete)
+                    user_to_delete.delete()
+                
+                results.append({
+                    'user_id': user_id,
+                    'status': 'success',
+                    'email': email,
+                    'message': 'User deleted successfully',
+                    'cleanup_summary': cleanup_summary
+                })
+                successfully_deleted += 1
+                
+            except User.DoesNotExist:
+                results.append({
+                    'user_id': user_id,
+                    'status': 'error',
+                    'message': 'User not found'
+                })
+                failed_deletions += 1
+                
+            except Exception as e:
+                results.append({
+                    'user_id': user_id,
+                    'status': 'error',
+                    'message': str(e)
+                })
+                failed_deletions += 1
+        
+        return Response({
+            "success": True,
+            "data": {
+                'total_requested': len(user_ids),
+                'successfully_deleted': successfully_deleted,
+                'failed_deletions': failed_deletions,
+                'results': results
+            }
+        }, status=status.HTTP_200_OK)
+    
+    def _cleanup_user_data(self, user):
+        """Same cleanup logic as single deletion"""
+        # Use the same method from AdminDeleteUserAccountView
+        admin_delete_view = AdminDeleteUserAccountView()
+        return admin_delete_view._cleanup_user_data(user)
 class AdminAllStudentsView(generics.ListAPIView):
     """
     Admin API endpoint for retrieving ALL students (both enrolled and not enrolled) with their enrollment information.
