@@ -751,7 +751,7 @@ class CourseViewSet(viewsets.ModelViewSet):
                 CourseCurriculum.objects.create(
                     course=new_course,
                     title=curriculum_item.title,
-                    video_url= generate_presigned_url(curriculum_item.video_url, 3600),
+                    video_url= curriculum_item.video_url,
                     order=curriculum_item.order
                 )
             
