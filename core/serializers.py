@@ -1371,7 +1371,7 @@ class LightweightEnrollmentSerializer(serializers.ModelSerializer):
         """Calculate total duration from video URLs"""
         try:
             course_id = obj.course.id
-            cache_key = f"course_duration_v4_{course_id}"
+            cache_key = f"course_duration_v6_{course_id}"
             cached_duration = cache.get(cache_key)
             
             if cached_duration is not None:
@@ -1405,7 +1405,7 @@ class LightweightEnrollmentSerializer(serializers.ModelSerializer):
             return 10
         
         url_hash = hashlib.md5(video_url.encode()).hexdigest()
-        cache_key = f"video_duration_v4_{url_hash}"
+        cache_key = f"video_duration_v6_{url_hash}"
         
         cached_duration = cache.get(cache_key)
         if cached_duration is not None:
