@@ -440,3 +440,28 @@ def process_course_purchase(user, course, plan_type, razorpay_payment_id, razorp
         logger.error(f"Failed to process course purchase: {str(e)}")
         raise
             
+def clear_enrollment_cache(user_id):
+    """
+    Utility function to clear all enrollment-related cache for a user.
+    Call this whenever enrollment data is modified outside of the model save.
+    """
+    from django.core.cache import cache
+    import hashlib
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    logger.info(f"🧹 [Services] Clearing enrollment cache for user {user_id}")
+    
+    # Clear main enrollment list cache (both show_all variants)
+    for show_all in ['true', 'false']:
+        key_data = f"enrollments_v6_{user_id}_{show_all}"
+        cache_key = hashlib.md5(key_data.encode()).hexdigest()
+        cache.delete(cache_key)
+        logger.debug(f"Cleared enrollment list cache: {cache_key}")
+    
+    # Clear enrollment summary cache
+    summary_cache_key = f"enrollment_summary_v3_{user_id}"
+    cache.delete(summary_cache_key)
+    logger.debug(f"Cleared enrollment summary cache: {summary_cache_key}")
+    
+    logger.info(f"✅ [Services] Cleared enrollment cache for user {user_id}")

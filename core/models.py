@@ -237,8 +237,8 @@ class Enrollment(models.Model):
         super().save(*args, **kwargs)
         from django.core.cache import cache
         cache_patterns = [
-            f"enrollments_v4_{self.user_id}_true",
-            f"enrollments_v4_{self.user_id}_false",
+            f"enrollments_v6_{self.user_id}_true",
+            f"enrollments_v6_{self.user_id}_false",
             f"enrollment_status_{self.user_id}_{self.course_id}",
             f"enrollment_detail_{self.user_id}_{self.id}"
         ]
