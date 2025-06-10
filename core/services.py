@@ -14,61 +14,64 @@ class RazorpayService:
         self.client = razorpay.Client(
             auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET)
         )
-        
-    def create_order(self, amount, currency=None, receipt=None, notes=None):
-        """
-        Create a Razorpay order
-        
-        Args:
-            amount: Amount in smallest currency unit (paise for INR)
-            currency: Currency code (default: settings.RAZORPAY_CURRENCY)
-            receipt: Receipt number for your reference
-            notes: Additional notes as a dict
-            
-        Returns:
-            order_id: Razorpay Order ID
-        """
-        try:
-            data = {
-                'amount': int(amount * 100),  # Convert to paise
-                'currency': currency or settings.RAZORPAY_CURRENCY,
-            }
-            
-            if receipt:
-                data['receipt'] = receipt
-                
-            if notes:
-                data['notes'] = notes
-                
-            order = self.client.order.create(data=data)
-            return order
-        except Exception as e:
-            logger.error(f"Razorpay order creation failed: {str(e)}")
-            raise
     
-    def verify_payment_signature(self, payment_id, order_id, signature):
+    def verify_payment_by_id(self, payment_id, expected_amount=None):
         """
-        Verify Razorpay payment signature
+        Verify payment using payment ID only (no order required)
         
         Args:
             payment_id: Razorpay Payment ID
-            order_id: Razorpay Order ID
-            signature: Razorpay Payment Signature
+            expected_amount: Expected amount in rupees (optional verification)
             
         Returns:
-            bool: True if signature is valid
+            dict: Payment details if valid, raises exception if invalid
         """
         try:
+            # Fetch payment details from Razorpay
+            payment = self.client.payment.fetch(payment_id)
+            logger.info(f"Payment details fetched: {payment['id']}, status: {payment['status']}")
+            
+            # Verify payment status
+            if payment['status'] != 'captured':
+                raise ValueError(f"Payment not completed. Status: {payment['status']}")
+            
+           
+            return payment
+            
+        except razorpay.errors.BadRequestError as e:
+            logger.error(f"Invalid payment ID: {payment_id}")
+            raise ValueError("Invalid payment ID")
+        except Exception as e:
+            logger.error(f"Payment verification failed: {str(e)}")
+            raise
+    
+    # Keep your existing methods but modify verify_payment_signature
+    def verify_payment_signature(self, payment_id, order_id=None, signature=None):
+        """
+        Verify payment - if no order_id, use payment ID verification only
+        
+        Args:
+            payment_id: Razorpay Payment ID
+            order_id: Razorpay Order ID (optional)
+            signature: Razorpay Payment Signature (optional)
+            
+        Returns:
+            bool: True if payment is valid
+        """
+        try:
+            # If no order_id provided, use payment ID verification
+            if not order_id:
+                payment = self.verify_payment_by_id(payment_id)
+                return payment['status'] == 'captured'
+            
+            # Original signature verification for order-based payments
             return self.client.utility.verify_payment_signature({
                 'razorpay_payment_id': payment_id,
-                # 'razorpay_order_id': order_id,
+                'razorpay_order_id': order_id,
                 'razorpay_signature': signature
             })
-        except razorpay.errors.SignatureVerificationError:
-            logger.error("Razorpay signature verification failed")
-            return False
         except Exception as e:
-            logger.error(f"Razorpay verification error: {str(e)}")
+            logger.error(f"Payment verification error: {str(e)}")
             return False
     
     def get_payment_details(self, payment_id):
