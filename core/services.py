@@ -39,7 +39,7 @@ class RazorpayService:
             return payment
             
         except razorpay.errors.BadRequestError as e:
-            logger.error(f"Invalid payment ID: {payment_id}")
+            logger.error(f"Invalid payment ID: {payment_id} {str(e)}")
             raise ValueError("Invalid payment ID")
         except Exception as e:
             logger.error(f"Payment verification failed: {str(e)}")
