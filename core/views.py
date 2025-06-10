@@ -2590,6 +2590,9 @@ class CoursePurchaseView(generics.CreateAPIView):
         razorpay_order_id = serializer.validated_data['razorpay_order_id']
         razorpay_signature = serializer.validated_data['razorpay_signature']
         
+        
+        
+        
         try:
             # Get objects
             # Get objects
