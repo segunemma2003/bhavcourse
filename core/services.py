@@ -296,6 +296,19 @@ def process_course_purchase(user, course, plan_type, razorpay_payment_id, razorp
         dict: Dictionary containing created objects and status
     """
     try:
+        razorpay_service = RazorpayService()
+        is_valid = razorpay_service.verify_payment_signature(
+            razorpay_payment_id, 
+            razorpay_order_id, 
+            razorpay_signature
+        )
+        
+        if not is_valid:
+            logger.error(f"❌ Payment verification failed for order {razorpay_order_id}")
+            raise ValueError("Payment verification failed. Invalid signature.")
+        
+        logger.info(f"✅ Payment verified successfully for order {razorpay_order_id}")
+        
         # Get plan amount based on plan type
         if plan_type == CoursePlanType.ONE_MONTH:
             amount = course.price_one_month
