@@ -30,7 +30,7 @@ class RazorpayService:
             # Fetch payment details from Razorpay
             payment = self.client.payment.fetch(payment_id)
             logger.info(f"Payment details fetched: {payment['id']}, status: {payment['status']}")
-            
+            print(payment)
             # Verify payment status
             if payment['status'] != 'captured':
                 raise ValueError(f"Payment not completed. Status: {payment['status']}")
@@ -481,3 +481,14 @@ def clear_enrollment_cache(user_id):
     logger.debug(f"Cleared enrollment summary cache: {summary_cache_key}")
     
     logger.info(f"✅ [Services] Cleared enrollment cache for user {user_id}")
+    
+    
+    
+    
+    razorpay_service = RazorpayService()
+    is_valid = razorpay_service.verify_payment_signature(
+        "pay_QfWlmyjo3J6oAP", 
+            None, 
+        "4567890898999899"
+    )
+    print(is_valid)
