@@ -158,7 +158,7 @@ class CreateOrderView(views.APIView):
         except Exception as e:
             logger.error(f"Failed to create Razorpay order: {str(e)}")
             return Response(
-                {"error": "Failed to create payment order. Please try again."},
+                {"error": f"Failed to create payment order. Please try again.{str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
