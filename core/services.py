@@ -14,6 +14,37 @@ class RazorpayService:
         self.client = razorpay.Client(
             auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET)
         )
+        
+    def create_order(self, amount, currency=None, receipt=None, notes=None):
+        """
+        Create a Razorpay order
+        
+        Args:
+            amount: Amount in smallest currency unit (paise for INR)
+            currency: Currency code (default: settings.RAZORPAY_CURRENCY)
+            receipt: Receipt number for your reference
+            notes: Additional notes as a dict
+            
+        Returns:
+            order_id: Razorpay Order ID
+        """
+        try:
+            data = {
+                'amount': int(amount * 100),  # Convert to paise
+                'currency': currency or settings.RAZORPAY_CURRENCY,
+            }
+            
+            if receipt:
+                data['receipt'] = receipt
+                
+            if notes:
+                data['notes'] = notes
+                
+            order = self.client.order.create(data=data)
+            return order
+        except Exception as e:
+            logger.error(f"Razorpay order creation failed: {str(e)}")
+            raise
     
     def verify_payment_by_id(self, payment_id, expected_amount=None):
         """
