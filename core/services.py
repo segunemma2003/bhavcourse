@@ -516,10 +516,4 @@ def clear_enrollment_cache(user_id):
     
     
     
-    razorpay_service = RazorpayService()
-    is_valid = razorpay_service.verify_payment_signature(
-        "pay_QfWlmyjo3J6oAP", 
-            None, 
-        "4567890898999899"
-    )
-    print(is_valid)
+    

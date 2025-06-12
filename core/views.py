@@ -955,6 +955,16 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
                 )
             ).order_by('-date_enrolled')
     
+    def _get_cache_key(self, request):
+        """Generate cache key for enrollment list"""
+        show_all = request.query_params.get('show_all', 'false')
+        key_data = f"enrollments_v6_{request.user.id}_{show_all}"
+        return hashlib.md5(key_data.encode()).hexdigest()
+    
+    def _clear_user_cache(self, user_id):
+        """Clear all enrollment caches for a user"""
+        Enrollment.clear_user_enrollment_caches(user_id)
+        
     def list(self, request, *args, **kwargs):
         """HEAVILY CACHED list with smart cache keys"""
         try:
@@ -992,20 +1002,6 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
                 {"error": "Failed to fetch enrollments", "detail": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-    
-    def _get_cache_key(self, request):
-        """Generate deterministic cache key"""
-        user_id = request.user.id
-        show_all = request.query_params.get('show_all', 'false')
-        key_data = f"enrollments_v6_{user_id}_{show_all}"
-        return hashlib.md5(key_data.encode()).hexdigest()
-    
-    def _clear_user_cache(self, user_id):
-        """Clear cache when data changes"""
-        for show_all in ['true', 'false']:
-            key_data = f"enrollments_v6_{user_id}_{show_all}"
-            cache_key = hashlib.md5(key_data.encode()).hexdigest()
-            cache.delete(cache_key)
     
     # Keep all your existing methods but add cache clearing:
     def create(self, request, *args, **kwargs):

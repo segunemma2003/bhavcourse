@@ -381,3 +381,8 @@ class DurationCacheWarmer:
         
         logger.info(f"Completed duration cache warming: {processed}/{total} videos processed")
         return processed
+    
+def clear_enrollment_cache(user_id):
+    """Utility function for external services"""
+    from .models import Enrollment
+    Enrollment.clear_user_enrollment_caches(user_id) 

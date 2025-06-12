@@ -1,9 +1,11 @@
+import hashlib
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.utils import timezone
 import random
 import string
 from datetime import timedelta
+from django.core.cache import cache
 from django.conf import settings
 
 class CustomUserManager(BaseUserManager):
@@ -235,16 +237,44 @@ class Enrollment(models.Model):
                 self.expiry_date = base_date + timezone.timedelta(days=90)
         
         super().save(*args, **kwargs)
-        from django.core.cache import cache
+        self._clear_enrollment_caches()
+    
+    def delete(self, *args, **kwargs):
+        user_id = self.user_id  # Store before deletion
+        result = super().delete(*args, **kwargs)
+        self._clear_enrollment_caches_for_user(user_id)
+        return result
+    
+    def _clear_enrollment_caches(self):
+        """Clear cache for this enrollment's user"""
+        self._clear_enrollment_caches_for_user(self.user_id)
+    
+    @staticmethod
+    def _clear_enrollment_caches_for_user(user_id):
+        """Clear all enrollment cache variations for a user"""
         cache_patterns = [
-            f"enrollments_v6_{self.user_id}_true",
-            f"enrollments_v6_{self.user_id}_false",
-            f"enrollment_status_{self.user_id}_{self.course_id}",
-            f"enrollment_detail_{self.user_id}_{self.id}"
+            f"enrollments_v6_{user_id}_true",
+            f"enrollments_v6_{user_id}_false", 
+            f"enrollment_summary_v3_{user_id}",
+            f"enrollment_status_{user_id}_*",  # Will need wildcard deletion
         ]
+        
         for pattern in cache_patterns:
-            cache.delete(pattern)
-
+            if '*' in pattern:
+                # For wildcard patterns, we'd need to implement a more complex cache clearing
+                # For now, clear common course IDs (1-1000)
+                base_pattern = pattern.replace('*', '')
+                for course_id in range(1, 1001):
+                    cache_key = f"{base_pattern}{course_id}"
+                    cache.delete(hashlib.md5(cache_key.encode()).hexdigest())
+            else:
+                cache_key = hashlib.md5(pattern.encode()).hexdigest()
+                cache.delete(cache_key)
+    
+    @staticmethod
+    def clear_user_enrollment_caches(user_id):
+        """Public method for external cache clearing"""
+        Enrollment._clear_enrollment_caches_for_user(user_id)
     
     def get_days_remaining(self):
         """
