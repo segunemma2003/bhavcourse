@@ -47,13 +47,13 @@ jobs:
           DATABASES = {
               'default': {
                   'ENGINE': 'django.db.backends.mysql',
-                  'NAME': 'bhavani',
-                  'USER': 'bhavaniusers',
-                  'PASSWORD': '',
-                  'HOST': '127.0.0.1',  # Use TCP/IP connection instead of socket
+                  'NAME': 'test_db',
+                  'USER': 'root',
+                  'PASSWORD': 'root',
+                  'HOST': '127.0.0.1',
                   'PORT': '3306',
                   'TEST': {
-                      'NAME': 'bhavani',
+                      'NAME': 'test_db',
                       'CHARSET': 'utf8mb4',
                       'COLLATION': 'utf8mb4_unicode_ci',
                   },
@@ -64,9 +64,6 @@ jobs:
               }
           }
 
-          # Disable some optional apps if needed for tests
-          # Example: INSTALLED_APPS.remove('some_problematic_app')
-
           # Use in-memory file storage for tests
           DEFAULT_FILE_STORAGE = 'django.core.files.storage.InMemoryStorage'
 
@@ -75,7 +72,7 @@ jobs:
               'django.contrib.auth.hashers.MD5PasswordHasher',
           ]
 
-          # Disable migrations for tests
+          # Disable migrations for tests - this prevents migration conflicts
           class DisableMigrations:
               def __contains__(self, item):
                   return True
@@ -85,31 +82,36 @@ jobs:
           MIGRATION_MODULES = DisableMigrations()
           EOL
 
-      - name: Run Tests
+      - name: Handle Migration Conflicts and Run Tests
         env:
           DJANGO_SETTINGS_MODULE: test_settings
           PYTHONPATH: "/tmp/test_settings:${{ github.workspace }}"
         run: |
           # Wait for MySQL to be ready
-          sleep 5
+          sleep 10
 
           # Test database connection
           python -c "import MySQLdb; MySQLdb.connect(host='127.0.0.1', user='root', passwd='root', db='test_db', port=3306)"
 
-          # Run Django tests
+          # Check for migration conflicts and merge if needed
+          echo "Checking for migration conflicts..."
+          if python manage.py showmigrations --plan 2>&1 | grep -E "(conflicting|multiple leaf nodes)"; then
+            echo "Migration conflicts detected, creating merge migration..."
+            python manage.py makemigrations --merge --noinput
+          fi
+
+          # Run Django tests with disabled migrations
           python manage.py test --keepdb
 
   deploy:
-    # Comment out the next line to skip test dependency if needed
-    # needs: test
+    needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2 # This is crucial - we need to check out the code first!
+      - uses: actions/checkout@v2
 
       - name: Debug SSH Key
         run: |
-          echo "SSH Key length: ${#SSH_KEY}"
-          echo "First 10 characters: ${SSH_KEY:0:10}..."
+          echo "SSH Key configured: $([[ -n "$SSH_KEY" ]] && echo "Yes" || echo "No")"
         env:
           SSH_KEY: ${{ secrets.SSH_KEY }}
 
