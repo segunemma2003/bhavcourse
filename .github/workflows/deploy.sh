@@ -133,7 +133,7 @@ python manage.py collectstatic --noinput
 find . -type d -exec chmod 755 {} \;
 find . -type f -exec chmod 644 {} \;
 chmod +x manage.py deploy.sh
-
+sudo chmod +x /var/www/bhavani/venv/bin/gunicorn
 # Create a deployment log
 echo "$(date): Deployment completed successfully" >> logs/deployment.log
 
@@ -142,7 +142,6 @@ sudo systemctl restart redis-server
 
 if command -v supervisorctl &> /dev/null; then
     echo "Restarting services with supervisor..."
-    sudo chmod +x /var/www/bhavani/venv/bin/gunicorn
     sudo supervisorctl restart courseapp:* || echo "Supervisor not configured yet"
 fi
 
