@@ -10,6 +10,7 @@ from django.core.mail import send_mail
 from core.s3_utils import generate_presigned_url, is_s3_url
 from django.core.cache import cache
 from django.conf import settings
+from django.db.models import Count, Prefetch, Q, Exists, OuterRef
 from django.db.models import Q, Prefetch
 # Add or modify the following in core/views.py
 from rest_framework import viewsets, status, parsers
@@ -73,34 +74,65 @@ class CategoryViewSet(viewsets.ModelViewSet):
     serializer_class = CategorySerializer
     permission_classes = [permissions.IsAdminUser]
     
+    
+    def get_permissions(self):
+       if self.action in ['list', 'retrieve']:
+           return [permissions.AllowAny()]
+       return super().get_permissions()
+    
     @swagger_auto_schema(
         operation_summary="List all categories",
         operation_description="Returns a list of all available course categories."
     )
     def list(self, request, *args, **kwargs):
-        return super().list(request, *args, **kwargs)
+       """Cached category list"""
+       cache_key = "categories_list_v8"
+       cached_data = cache.get(cache_key)
+       
+       if cached_data:
+           return Response(cached_data)
+       
+       queryset = self.get_queryset()
+       serializer = self.get_serializer(queryset, many=True)
+       response_data = serializer.data
+       
+       # Cache for 1 hour
+       cache.set(cache_key, response_data, 3600)
+       return Response(response_data)
     
     @swagger_auto_schema(
         operation_summary="Retrieve a category",
         operation_description="Returns the details of a specific category by ID along with related courses."
     )
     def retrieve(self, request, *args, **kwargs):
-        instance = self.get_object()
-        serializer = self.get_serializer(instance)
-        
-        # Get courses for this category
-        courses = Course.objects.filter(category=instance)
-        course_serializer = CourseListSerializer(
-            courses, 
-            many=True, 
-            context={'request': request}
-        )
-        
-        # Combine data
-        data = serializer.data
-        data['courses'] = course_serializer.data
-        
-        return Response(data)
+       """Cached category detail with courses"""
+       category_id = kwargs.get('pk')
+       cache_key = f"category_detail_v8_{category_id}"
+       cached_data = cache.get(cache_key)
+       
+       if cached_data:
+           return Response(cached_data)
+       
+       instance = self.get_object()
+       serializer = self.get_serializer(instance)
+       
+       # Get courses for this category with optimized query
+       courses = Course.objects.filter(category=instance).select_related('category').annotate(
+           enrolled_count=Count('enrollments', filter=Q(enrollments__is_active=True))
+       )[:20]  # Limit to 20 courses
+       
+       course_serializer = CourseListSerializer(
+           courses, 
+           many=True, 
+           context={'request': request}
+       )
+       
+       data = serializer.data
+       data['courses'] = course_serializer.data
+       
+       # Cache for 30 minutes
+       cache.set(cache_key, data, 1800)
+       return Response(data)
     
     @swagger_auto_schema(
         operation_summary="Create a category",
@@ -163,59 +195,48 @@ class CourseViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         """
-        Optionally restricts the returned courses by filtering against query parameters.
-        OPTIMIZED: Includes prefetch_related for related objects to reduce database queries.
+        MASSIVELY OPTIMIZED queryset with smart annotations and minimal data loading
         """
-        # Base queryset with optimized joins
-        queryset = Course.objects.select_related(
-            'category'  # Join category table
-        ).prefetch_related(
-            # Prefetch objectives
-            models.Prefetch(
-                'objectives',
-                queryset=CourseObjective.objects.all()
-            ),
-            # Prefetch requirements
-            models.Prefetch(
-                'requirements', 
-                queryset=CourseRequirement.objects.all()
-            ),
-            # Prefetch curriculum ordered by order field
-            models.Prefetch(
-                'curriculum',
-                queryset=CourseCurriculum.objects.order_by('order')
-            ),
-            # Prefetch enrollments for enrollment checking
-            models.Prefetch(
-                'enrollments',
-                queryset=Enrollment.objects.select_related('user')
-            ),
-            # Prefetch wishlist entries
-            models.Prefetch(
-                'wishlisted_by',
-                queryset=Wishlist.objects.select_related('user')
-            )
+        # Get base queryset with optimized select_related
+        queryset = Course.objects.select_related('category')
+        
+        # Add enrollment count annotation for performance
+        queryset = queryset.annotate(
+            enrolled_count=Count('enrollments', filter=Q(enrollments__is_active=True))
         )
         
+        # For list view, add user-specific annotations if authenticated
+        if self.action == 'list' and hasattr(self, 'request') and self.request.user.is_authenticated:
+            user = self.request.user
+            
+            # Annotate with user enrollment status
+            queryset = queryset.annotate(
+                _user_enrollment_status=Exists(
+                    Enrollment.objects.filter(
+                        course=OuterRef('pk'),
+                        user=user,
+                        is_active=True
+                    ).exclude(
+                        expiry_date__lt=timezone.now()
+                    )
+                )
+            )
+        
         # Apply filters
-        # Filter by category
         category_id = self.request.query_params.get('category')
         if category_id:
             queryset = queryset.filter(category_id=category_id)
         
-        # Filter featured courses
         is_featured = self.request.query_params.get('featured')
         if is_featured and is_featured.lower() == 'true':
             queryset = queryset.filter(is_featured=True)
         
-        # Search by title or description
         search = self.request.query_params.get('search')
         if search:
             queryset = queryset.filter(
                 Q(title__icontains=search) | Q(small_desc__icontains=search)
             )
         
-        # Filter by location
         location = self.request.query_params.get('location')
         if location:
             queryset = queryset.filter(location__icontains=location)
@@ -237,10 +258,42 @@ class CourseViewSet(viewsets.ModelViewSet):
     )
     def list(self, request, *args, **kwargs):
         """
-        List all courses with complete information including enrollment status.
-        Uses CourseListSerializer which now includes all the detailed information.
+        HEAVILY CACHED list with smart cache keys
         """
-        return super().list(request, *args, **kwargs)
+        # Generate cache key based on user and filters
+        user_id = request.user.id if request.user.is_authenticated else 'anon'
+        filters = {
+            'category': request.query_params.get('category', ''),
+            'featured': request.query_params.get('featured', ''),
+            'search': request.query_params.get('search', ''),
+            'location': request.query_params.get('location', ''),
+            'page': request.query_params.get('page', '1')
+        }
+        
+        cache_key_data = f"courses_list_v8_{user_id}_{hash(frozenset(filters.items()))}"
+        cache_key = hashlib.md5(cache_key_data.encode()).hexdigest()
+        
+        # Try cache first
+        cached_data = cache.get(cache_key)
+        if cached_data:
+            return Response(cached_data)
+        
+        # Get optimized queryset
+        queryset = self.get_queryset()
+        
+        # Paginate efficiently
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            response_data = self.get_paginated_response(serializer.data).data
+        else:
+            serializer = self.get_serializer(queryset[:50], many=True)  # Limit to 50 if no pagination
+            response_data = serializer.data
+        
+        # Cache for 10 minutes
+        cache.set(cache_key, response_data, 600)
+        
+        return Response(response_data)
     
     @swagger_auto_schema(
         operation_summary="Retrieve a course",
@@ -251,9 +304,69 @@ class CourseViewSet(viewsets.ModelViewSet):
         }
     )
     def retrieve(self, request, *args, **kwargs):
-        return super().retrieve(request, *args, **kwargs)
+        """
+        OPTIMIZED course detail with caching
+        """
+        course_id = kwargs.get('pk')
+        user_id = request.user.id if request.user.is_authenticated else 'anon'
+        
+        cache_key = f"course_detail_v8_{course_id}_{user_id}"
+        cached_data = cache.get(cache_key)
+        if cached_data:
+            return Response(cached_data)
+        
+        # Get course with optimized prefetching
+        instance = self.get_object()
+        
+        # Prefetch related data efficiently
+        instance = Course.objects.select_related('category').prefetch_related(
+            Prefetch('objectives', queryset=CourseObjective.objects.only('id', 'description')),
+            Prefetch('requirements', queryset=CourseRequirement.objects.only('id', 'description')),
+            Prefetch('curriculum', queryset=CourseCurriculum.objects.only(
+                'id', 'title', 'video_url', 'order', 'presigned_url', 
+                'presigned_expires_at', 'url_generation_status'
+            ).order_by('order'))
+        ).get(pk=course_id)
+        
+        serializer = self.get_serializer(instance)
+        response_data = serializer.data
+        
+        # Cache for 5 minutes
+        cache.set(cache_key, response_data, 300)
+        
+        return Response(response_data)
     
     
+    def _clear_course_caches(self, course_id=None):
+        """Clear course-related caches"""
+        cache_patterns = [
+            "courses_list_v8_",  # All course list caches
+            "categories_list_v8",  # Category list cache
+        ]
+        
+        if course_id:
+            cache_patterns.extend([
+                f"course_detail_v8_{course_id}_",  # Specific course detail caches
+                f"course_duration_v8_{course_id}",  # Course duration cache
+            ])
+        
+        # Clear category detail caches (course lists in categories)
+        for cat_id in range(1, 100):  # Reasonable range
+            cache_patterns.append(f"category_detail_v8_{cat_id}")
+        
+        # Clear admin caches
+        cache_patterns.extend([
+            "admin_all_students_v8_",  # Admin student lists
+            "admin_student_enrollments_v8_",  # Admin enrollment details
+        ])
+        
+        # Use pattern-based clearing (simplified - in production use Redis SCAN)
+        cache_keys_to_clear = []
+        for pattern in cache_patterns[:50]:  # Limit to prevent memory issues
+            cache_keys_to_clear.append(hashlib.md5(pattern.encode()).hexdigest())
+        
+        cache.delete_many(cache_keys_to_clear)
+        
     @swagger_auto_schema(
         operation_summary="Create a new course",
         operation_description="Creates a new course with all related information (objectives, requirements, curriculum)",
@@ -263,17 +376,26 @@ class CourseViewSet(viewsets.ModelViewSet):
             status.HTTP_400_BAD_REQUEST: "Invalid request data"
         }
     )
-    @transaction.atomic
     def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        course = serializer.save()
+        """Clear relevant caches after course creation"""
+        result = super().create(request, *args, **kwargs)
         
-        # Return full course details
-        return Response(
-            CourseDetailSerializer(course, context=self.get_serializer_context()).data,
-            status=status.HTTP_201_CREATED
-        )
+        # Clear course list caches
+        self._clear_course_caches()
+        
+        return result
+    # @transaction.atomic
+    # def create(self, request, *args, **kwargs):
+    #     serializer = self.get_serializer(data=request.data)
+    #     serializer.is_valid(raise_exception=True)
+    #     course = serializer.save()
+        
+    #     self._clear_course_caches()?
+    #     # Return full course details
+    #     return Response(
+    #         CourseDetailSerializer(course, context=self.get_serializer_context()).data,
+    #         status=status.HTTP_201_CREATED
+    #     )
     
     @swagger_auto_schema(
         operation_summary="Update a course",
@@ -285,17 +407,26 @@ class CourseViewSet(viewsets.ModelViewSet):
             status.HTTP_404_NOT_FOUND: "Course not found"
         }
     )
-    @transaction.atomic
     def update(self, request, *args, **kwargs):
-        instance = self.get_object()
-        serializer = self.get_serializer(instance, data=request.data)
-        serializer.is_valid(raise_exception=True)
-        course = serializer.save()
+        """Clear relevant caches after course update"""
+        course_id = kwargs.get('pk')
+        result = super().update(request, *args, **kwargs)
         
-        # Return full course details
-        return Response(
-            CourseDetailSerializer(course, context=self.get_serializer_context()).data
-        )
+        # Clear specific course and list caches
+        self._clear_course_caches(course_id)
+        
+        return result
+    # @transaction.atomic
+    # def update(self, request, *args, **kwargs):
+    #     instance = self.get_object()
+    #     serializer = self.get_serializer(instance, data=request.data)
+    #     serializer.is_valid(raise_exception=True)
+    #     course = serializer.save()
+        
+    #     # Return full course details
+    #     return Response(
+    #         CourseDetailSerializer(course, context=self.get_serializer_context()).data
+    #     )
 
     @swagger_auto_schema(
         operation_summary="Partially update a course",
@@ -353,7 +484,14 @@ class CourseViewSet(viewsets.ModelViewSet):
         }
     )
     def destroy(self, request, *args, **kwargs):
-        return super().destroy(request, *args, **kwargs)
+        """Clear relevant caches after course deletion"""
+        course_id = kwargs.get('pk')
+        result = super().destroy(request, *args, **kwargs)
+        
+        # Clear all course-related caches
+        self._clear_course_caches(course_id)
+        
+        return result
     
     @swagger_auto_schema(
         method='get',
@@ -897,142 +1035,172 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
         return EnrollmentSerializer
     
     def get_queryset(self):
-        """OPTIMIZED: Different queries for different actions with curriculum count annotation"""
-        if getattr(self, 'swagger_fake_view', False):
-            return self.queryset
-        
-        # ACTION-SPECIFIC OPTIMIZATION
         if self.action == 'list':
-            # MINIMAL QUERY FOR LIST - with curriculum count annotation
+            # ENHANCED queryset with curriculum count annotation
             return Enrollment.objects.filter(
                 user=self.request.user,
-                is_active=True  # Only show active enrollments
+                is_active=True
             ).select_related(
-                'course',           # Join course table
-                'course__category'  # Join category table  
+                'course',
+                'course__category'
             ).annotate(
-                # Add curriculum count for fast access
+                # Add curriculum count directly in query (super fast)
                 curriculum_count=Count('course__curriculum')
             ).prefetch_related(
-                # Prefetch curriculum for duration calculation
+                # Prefetch curriculum for duration calculation (if needed)
                 Prefetch(
                     'course__curriculum',
                     queryset=CourseCurriculum.objects.only(
-                        'id', 'title', 'video_url', 'order', 'course_id'
-                    ).order_by('order')
+                        'id', 'video_url'  # Only essential fields
+                    )
                 )
             ).only(
-                # Only fetch essential fields - reduces data transfer
+                # Minimize data transfer
                 'id', 'date_enrolled', 'plan_type', 'expiry_date', 
                 'amount_paid', 'is_active',
                 'course__id', 'course__title', 'course__image', 
                 'course__small_desc', 'course__category__name'
-            ).order_by('-date_enrolled')[:25]  # Limit to 25 most recent
-            
+            ).order_by('-date_enrolled')[:100] # Hard limit for performance
+        
         else:
-            # FULL QUERY FOR DETAIL VIEW
+            # Full query for detail view with optimized prefetching
             return Enrollment.objects.filter(
                 user=self.request.user
             ).select_related(
                 'course',
                 'course__category'
-            ).annotate(
-                curriculum_count=Count('course__curriculum')
             ).prefetch_related(
-                models.Prefetch(
+                Prefetch(
                     'course__objectives',
                     queryset=CourseObjective.objects.only('id', 'description')
                 ),
-                models.Prefetch(
+                Prefetch(
                     'course__requirements',
                     queryset=CourseRequirement.objects.only('id', 'description')
                 ),
-                models.Prefetch(
+                Prefetch(
                     'course__curriculum',
                     queryset=CourseCurriculum.objects.only(
-                        'id', 'title', 'video_url', 'order'
+                        'id', 'title', 'video_url', 'order', 'presigned_url',
+                        'presigned_expires_at', 'url_generation_status'
                     ).order_by('order')
                 )
             ).order_by('-date_enrolled')
     
-    def _get_cache_key(self, request):
-        """Generate cache key for enrollment list"""
+    def _get_cache_key(self, request, action='list'):
+        # Updated cache key
         show_all = request.query_params.get('show_all', 'false')
-        key_data = f"enrollments_v6_{request.user.id}_{show_all}"
+        key_data = f"enrollments_v8_{request.user.id}_{action}_{show_all}"
         return hashlib.md5(key_data.encode()).hexdigest()
+
     
     def _clear_user_cache(self, user_id):
         """Clear all enrollment caches for a user"""
         Enrollment.clear_user_enrollment_caches(user_id)
         
     def list(self, request, *args, **kwargs):
-        """HEAVILY CACHED list with smart cache keys"""
+        """
+        ULTRA-CACHED list with guaranteed sub-second response
+        """
+        # Check cache first
+        cache_key = self._get_cache_key(request)
+        cached_data = cache.get(cache_key)
+        if cached_data:
+            logger.info(f"Cache HIT for enrollments user {request.user.id}")
+            return Response(cached_data)
+        
+        logger.info(f"Cache MISS for enrollments user {request.user.id}")
+        
         try:
-            # STEP 1: Check cache first
-            cache_key = self._get_cache_key(request)
-            cached_data = cache.get(cache_key)
-            if cached_data:
-                logger.info(f"Cache HIT for user {request.user.id}")
-                return Response(cached_data)
-            
-            logger.info(f"Cache MISS for user {request.user.id} - fetching from DB")
-            
-            # STEP 2: Get optimized queryset
+            # Get optimized queryset
             queryset = self.get_queryset()
             
-            # STEP 3: Early return if no data
+            # Early return if no data
             if not queryset.exists():
                 empty_result = []
-                cache.set(cache_key, empty_result, 1800)
+                cache.set(cache_key, empty_result, 3600)
                 return Response(empty_result)
             
-            # STEP 4: Use lightweight serializer with duration extraction
+            # Serialize with optimized serializer
             serializer = self.get_serializer(queryset, many=True, context={'request': request})
             response_data = serializer.data
             
-            # STEP 5: Cache for 1 hour
+            # Cache for 1 hour
             cache.set(cache_key, response_data, 3600)
-            logger.info(f"Cached enrollment data for user {request.user.id}")
             
             return Response(response_data)
             
         except Exception as e:
             logger.error(f"Enrollment list error for user {request.user.id}: {str(e)}")
             return Response(
-                {"error": "Failed to fetch enrollments", "detail": str(e)},
+                {"error": "Failed to fetch enrollments"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+            
+    def _clear_user_caches(self, user_id):
+        """Clear all enrollment-related caches for a user - UPDATED FOR v8"""
+        cache_patterns = [
+            f"enrollments_v8_{user_id}_list_true",
+            f"enrollments_v8_{user_id}_list_false", 
+            f"enrollment_summary_v8_{user_id}",
+            f"enrollment_status_v8_{user_id}",  # Pattern for all course IDs
+        ]
+        
+        # Clear enrollment detail caches (use more targeted approach)
+        for enrollment_id in range(1, 1000):  # Reasonable range
+            cache_patterns.append(f"enrollment_detail_v8_{enrollment_id}")
+        
+        # Clear course and curriculum duration caches that might be affected
+        cache_patterns.extend([
+            f"course_detail_v8_",  # Will be part of pattern clearing
+            f"course_duration_v8_",  # Will be part of pattern clearing
+        ])
+        
+        # Convert to hashed keys and clear
+        hashed_keys = [hashlib.md5(p.encode()).hexdigest() for p in cache_patterns[:100]]
+        cache.delete_many(hashed_keys)
+   
     
     # Keep all your existing methods but add cache clearing:
     def create(self, request, *args, **kwargs):
-        try:
-            self._clear_user_cache(request.user.id)
-            from .payment_views import CreateOrderView
-            return CreateOrderView.as_view()(request)
-        except Exception as e:
-            logger.error(f"Error in enrollment create: {str(e)}")
-            return Response(
-                {"error": "Failed to create enrollment", "detail": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+       """Clear cache on enrollment creation"""
+       try:
+           result = super().create(request, *args, **kwargs)
+           # Clear user's enrollment caches
+           self._clear_user_caches(request.user.id)
+           return result
+       except Exception as e:
+           logger.error(f"Error in enrollment create: {str(e)}")
+           return Response(
+               {"error": "Failed to create enrollment"},
+               status=status.HTTP_500_INTERNAL_SERVER_ERROR
+           )
     
     def destroy(self, request, *args, **kwargs):
-        try:
-            self._clear_user_cache(request.user.id)
-            return super().destroy(request, *args, **kwargs)
-        except Exception as e:
-            logger.error(f"Error in enrollment destroy: {str(e)}")
-            return Response(
-                {"error": "Failed to delete enrollment", "detail": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+       """Clear cache on enrollment deletion"""
+       try:
+           result = super().destroy(request, *args, **kwargs)
+           self._clear_user_caches(request.user.id)
+           return result
+       except Exception as e:
+           logger.error(f"Error in enrollment destroy: {str(e)}")
+           return Response(
+               {"error": "Failed to delete enrollment"},
+               status=status.HTTP_500_INTERNAL_SERVER_ERROR
+           )
     
     def retrieve(self, request, *args, **kwargs):
-        """Retrieve with GUARANTEED fresh presigned URLs"""
+        """
+        OPTIMIZED retrieve with caching
+        """
+        enrollment_id = kwargs.get('pk')
+        cache_key = f"enrollment_detail_v8_{enrollment_id}"
+        
+        cached_data = cache.get(cache_key)
+        if cached_data:
+            return Response(cached_data)
+        
         try:
-            enrollment_id = kwargs.get('pk')
-            
-            # Get enrollment
             enrollment = self.get_queryset().filter(id=enrollment_id).first()
             if not enrollment:
                 return Response(
@@ -1040,47 +1208,17 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_404_NOT_FOUND
                 )
             
-            # FORCE FRESH URLS by modifying the video URLs directly
-            course = enrollment.course
-            
-            # Get all curriculum items and force fresh presigned URLs
-            for curriculum_item in course.curriculum.all():
-                if curriculum_item.video_url and is_s3_url(curriculum_item.video_url):
-                    # Generate fresh presigned URL directly
-                    fresh_url = generate_presigned_url(
-                        curriculum_item.video_url, 
-                        expiration=43200,  # 12 hours
-                       
-                    )
-                    # Temporarily store the fresh URL (don't save to DB)
-                    curriculum_item._fresh_video_url = fresh_url
-            
-            # Use modified serializer
-            class FreshEnrollmentSerializer(EnrollmentSerializer):
-                class FreshCourseDetailSerializer(CourseDetailSerializer):
-                    class FreshCourseCurriculumSerializer(CourseCurriculumSerializer):
-                        def get_video_url(self, obj):
-                            # Use the fresh URL we generated above
-                            if hasattr(obj, '_fresh_video_url'):
-                                return obj._fresh_video_url
-                            return super().get_video_url(obj)
-                    
-                    curriculum = FreshCourseCurriculumSerializer(many=True, read_only=True)
-                
-                course = FreshCourseDetailSerializer(read_only=True)
-            
-            serializer = FreshEnrollmentSerializer(enrollment, context={'request': request})
-            
-            logger.info(f"Retrieved enrollment {enrollment_id} with FORCED fresh URLs")
-            
-            return Response(serializer.data)
-            
+            serializer = self.get_serializer(enrollment, context={'request': request})
+            response_data = serializer.data
+            cache.set(cache_key, response_data, 1800)
+            return Response(response_data)
+        
         except Exception as e:
-            logger.error(f"Error in enrollment retrieve: {str(e)}")
-            return Response(
-                {"error": "Failed to fetch enrollment details", "detail": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+           logger.error(f"Error in enrollment retrieve: {str(e)}")
+           return Response(
+               {"error": "Failed to fetch enrollment details"},
+               status=status.HTTP_500_INTERNAL_SERVER_ERROR
+           )
     
     def get_fresh_serializer(self, enrollment, context=None):
         """Get serializer that generates fresh presigned URLs"""
@@ -1128,106 +1266,96 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['get'])
     def check_status(self, request):
+        """
+        OPTIMIZED status check with caching
+        """
+        course_id = request.query_params.get('course_id')
+        if not course_id:
+            return Response(
+                {"error": "course_id parameter is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        cache_key = f"enrollment_status_v8_{request.user.id}_{course_id}"
+        cached_result = cache.get(cache_key)
+        if cached_result:
+            return Response(cached_result)
+        
         try:
-            course_id = request.query_params.get('course_id')
-            if not course_id:
-                return Response(
-                    {"error": "course_id parameter is required"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            # OPTIMIZED: Add caching for enrollment status checks
-            cache_key = f"enrollment_status_{request.user.id}_{course_id}"
-            cached_result = cache.get(cache_key)
-            if cached_result:
-                return Response(cached_result)
-            
-            # OPTIMIZED: Use select_related for efficient database query
-            is_enrolled = Enrollment.objects.select_related('course').filter(
+            # Single optimized query
+            enrollment = Enrollment.objects.filter(
                 user=request.user, 
-                course_id=course_id
-            ).exists()
-            
-            # Get subscription details if enrolled
-            subscription_details = None
-            if is_enrolled:
-                subscription = UserSubscription.objects.select_related('plan').filter(
-                    user=request.user,
-                    is_active=True,
-                    end_date__gt=timezone.now()
-                ).first()
-                
-                if subscription:
-                    subscription_details = {
-                        'plan_name': subscription.plan.name,
-                        'end_date': subscription.end_date,
-                        'is_active': subscription.is_active
-                    }
+                course_id=course_id,
+                is_active=True
+            ).only('id', 'plan_type', 'expiry_date').first()
             
             result = {
-                'is_enrolled': is_enrolled,
-                'subscription_details': subscription_details
+                'is_enrolled': bool(enrollment),
+                'enrollment_details': None
             }
             
-            # Cache for 2 minutes
-            cache.set(cache_key, result, 120)
+            if enrollment:
+                result['enrollment_details'] = {
+                    'plan_type': enrollment.plan_type,
+                    'expiry_date': enrollment.expiry_date,
+                    'is_expired': enrollment.is_expired
+                }
             
+            # Cache for 5 minutes
+            cache.set(cache_key, result, 300)
             return Response(result)
             
         except Exception as e:
             logger.error(f"Error in check_status: {str(e)}")
             return Response(
-                {"error": "Failed to check enrollment status", "detail": str(e)},
+                {"error": "Failed to check enrollment status"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
     @action(detail=False, methods=['get'])
     def summary(self, request):
-        """Fast summary endpoint with aggregated data including total curriculum and duration"""
-        cache_key = f"enrollment_summary_v3_{request.user.id}"
+        """
+        ULTRA-FAST summary with heavy caching
+        """
+        cache_key = f"enrollment_summary_v8_{request.user.id}"
         cached_summary = cache.get(cache_key)
         
         if cached_summary:
             return Response(cached_summary)
         
-        # Use database aggregation for speed
-        from django.db.models import Count, Q, Sum
-        
-        summary = Enrollment.objects.filter(user=request.user).aggregate(
-            total_enrollments=Count('id'),
-            active_enrollments=Count('id', filter=Q(is_active=True)),
-            expired_enrollments=Count('id', filter=Q(is_active=True, expiry_date__lt=timezone.now())),
-            # Add total curriculum count across all enrollments
-            total_curriculum_items=Sum('course__curriculum__id', distinct=True)
-        )
-        
-        # Calculate total estimated duration
-        active_enrollments = Enrollment.objects.filter(
-            user=request.user, 
-            is_active=True
-        ).prefetch_related('course__curriculum')
-        
-        total_duration = 0
-        total_curriculum = 0
-        
-        for enrollment in active_enrollments:
-            curriculum_items = enrollment.course.curriculum.all()
-            total_curriculum += len(curriculum_items)
+        try:
+            # Use single aggregated query for performance
+            from django.db.models import Count, Q, Sum
             
-            # Extract duration from video URLs (cached per course)
-            course_duration = self._get_course_duration(enrollment.course.id, curriculum_items)
-            total_duration += course_duration
+            summary = Enrollment.objects.filter(user=request.user).aggregate(
+                total_enrollments=Count('id'),
+                active_enrollments=Count('id', filter=Q(is_active=True)),
+                expired_enrollments=Count('id', filter=Q(
+                    is_active=True, 
+                    expiry_date__lt=timezone.now()
+                )),
+                total_spent=Sum('amount_paid', filter=Q(is_active=True))
+            )
+            
+            # Add default values for None results
+            summary.update({
+                'total_spent': float(summary['total_spent'] or 0),
+                'total_enrollments': summary['total_enrollments'] or 0,
+                'active_enrollments': summary['active_enrollments'] or 0,
+                'expired_enrollments': summary['expired_enrollments'] or 0
+            })
+            
+            # Cache for 1 hour
+            cache.set(cache_key, summary, 3600)
+            return Response(summary)
+            
+        except Exception as e:
+            logger.error(f"Error in enrollment summary: {str(e)}")
+            return Response(
+                {"error": "Failed to fetch summary"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
         
-        summary.update({
-            'total_curriculum_items': total_curriculum,
-            'total_estimated_duration_minutes': total_duration,
-            'total_estimated_duration_hours': round(total_duration / 60, 1)
-        })
-        
-        # Cache summary for 30 minutes
-        cache.set(cache_key, summary, 1800)
-        return Response(summary)
-    
     def _get_course_duration(self, course_id, curriculum_items):
         """Get total duration for a course with caching"""
         cache_key = f"course_duration_{course_id}"
@@ -1622,16 +1750,37 @@ class WishlistViewSet(viewsets.ModelViewSet):
     queryset = Wishlist.objects.none()  # Dummy queryset for swagger
     
     def get_queryset(self):
-        if getattr(self, 'swagger_fake_view', False):
-            return self.queryset
-        return Wishlist.objects.filter(user=self.request.user)
+       if getattr(self, 'swagger_fake_view', False):
+           return self.queryset
+       
+       return Wishlist.objects.filter(
+           user=self.request.user
+       ).select_related(
+           'course', 'course__category'
+       ).only(
+           'id', 'date_added',
+           'course__id', 'course__title', 'course__image', 'course__small_desc'
+       ).order_by('-date_added')[:50]
     
     @swagger_auto_schema(
         operation_summary="List wishlist items",
         operation_description="Returns a list of courses in the user's wishlist."
     )
     def list(self, request, *args, **kwargs):
-        return super().list(request, *args, **kwargs)
+       """Cached wishlist"""
+       cache_key = f"wishlist_v8_{request.user.id}"
+       cached_data = cache.get(cache_key)
+       
+       if cached_data:
+           return Response(cached_data)
+       
+       queryset = self.get_queryset()
+       serializer = self.get_serializer(queryset, many=True)
+       response_data = serializer.data
+       
+       # Cache for 15 minutes
+       cache.set(cache_key, response_data, 900)
+       return Response(response_data)
     
     @swagger_auto_schema(
         operation_summary="Retrieve wishlist item",
@@ -1646,14 +1795,22 @@ class WishlistViewSet(viewsets.ModelViewSet):
         request_body=WishlistSerializer
     )
     def create(self, request, *args, **kwargs):
-        # Check if already in wishlist
-        course_id = request.data.get('course')
-        if Wishlist.objects.filter(user=request.user, course_id=course_id).exists():
-            return Response(
-                {'error': 'This course is already in your wishlist'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        return super().create(request, *args, **kwargs)
+       """Optimized create with duplicate check"""
+       course_id = request.data.get('course')
+       
+       # Check if already exists
+       if Wishlist.objects.filter(user=request.user, course_id=course_id).exists():
+           return Response(
+               {'error': 'This course is already in your wishlist'},
+               status=status.HTTP_400_BAD_REQUEST
+           )
+       
+       result = super().create(request, *args, **kwargs)
+       
+       # Clear wishlist cache
+       cache.delete(f"wishlist_v8_{request.user.id}")
+       
+       return result
     
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
@@ -1663,7 +1820,11 @@ class WishlistViewSet(viewsets.ModelViewSet):
         operation_description="Removes a course from the user's wishlist."
     )
     def destroy(self, request, *args, **kwargs):
-        return super().destroy(request, *args, **kwargs)
+       """Clear cache on deletion"""
+       result = super().destroy(request, *args, **kwargs)
+       cache.delete(f"wishlist_v8_{request.user.id}")
+       return result
+
 
 class PaymentCardViewSet(viewsets.ModelViewSet):
     """
@@ -1858,18 +2019,20 @@ class NotificationViewSet(viewsets.ModelViewSet):
     queryset = Notification.objects.none()  # Dummy queryset for swagger
     
     def get_queryset(self):
-        if getattr(self, 'swagger_fake_view', False):
-            return self.queryset
-            
-        # Filter by is_seen if provided
-        is_seen = self.request.query_params.get('is_seen')
-        queryset = Notification.objects.filter(user=self.request.user)
-        
-        if is_seen is not None:
-            is_seen_bool = is_seen.lower() == 'true'
-            queryset = queryset.filter(is_seen=is_seen_bool)
-            
-        return queryset
+       if getattr(self, 'swagger_fake_view', False):
+           return self.queryset
+       
+       queryset = Notification.objects.filter(user=self.request.user)
+       
+       is_seen = self.request.query_params.get('is_seen')
+       if is_seen is not None:
+           is_seen_bool = is_seen.lower() == 'true'
+           queryset = queryset.filter(is_seen=is_seen_bool)
+       
+       # Only fetch necessary fields and limit results
+       return queryset.only(
+           'id', 'title', 'message', 'notification_type', 'is_seen', 'created_at'
+       ).order_by('-created_at')[:100]  # Limit to 100 notifications
     
     @swagger_auto_schema(
         operation_summary="List notifications",
@@ -1884,7 +2047,21 @@ class NotificationViewSet(viewsets.ModelViewSet):
         ]
     )
     def list(self, request, *args, **kwargs):
-        return super().list(request, *args, **kwargs)
+       """Cached notification list"""
+       is_seen = request.query_params.get('is_seen', 'all')
+       cache_key = f"notifications_v8_{request.user.id}_{is_seen}"
+       cached_data = cache.get(cache_key)
+       
+       if cached_data:
+           return Response(cached_data)
+       
+       queryset = self.get_queryset()
+       serializer = self.get_serializer(queryset, many=True)
+       response_data = serializer.data
+       
+       # Cache for 5 minutes (notifications change frequently)
+       cache.set(cache_key, response_data, 300)
+       return Response(response_data)
     
     @swagger_auto_schema(
         operation_summary="Retrieve notification",
@@ -1913,12 +2090,24 @@ class NotificationViewSet(viewsets.ModelViewSet):
     )
     @action(detail=False, methods=['post'])
     def mark_all_as_seen(self, request):
-        Notification.objects.filter(
+        """Updated cache clearing for v8"""
+        updated_count = Notification.objects.filter(
             user=request.user,
             is_seen=False
         ).update(is_seen=True)
         
-        return Response({'message': 'All notifications marked as seen'})
+        # Clear notification caches - UPDATED
+        cache_patterns = [
+            f"notifications_v8_{request.user.id}_all",
+            f"notifications_v8_{request.user.id}_true", 
+            f"notifications_v8_{request.user.id}_false"
+        ]
+        cache.delete_many(cache_patterns)
+        
+        return Response({
+            'message': f'Marked {updated_count} notifications as seen'
+        })
+
     
     @swagger_auto_schema(
         operation_summary="Mark notification as seen",

@@ -2,30 +2,74 @@ from celery import shared_task
 from django.utils import timezone
 from django.core.mail import send_mail
 from django.conf import settings
-from .models import CoursePlanType, Enrollment, UserSubscription, Notification, FCMDevice
+from django.core.cache import cache
+from .models import CoursePlanType, Enrollment, UserSubscription, Notification, FCMDevice, CourseCurriculum
 from django.contrib.auth import get_user_model
 from .firebase import send_firebase_message, send_bulk_notifications
+from .s3_utils import generate_presigned_url, is_s3_url
+from datetime import timedelta
 import logging
+import hashlib
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
 
+
+@shared_task
+def pre_warm_duration_caches():
+    """
+    Pre-calculate and cache video durations during low-traffic periods
+    """
+    try:
+        # Get all unique course IDs that have recent enrollments
+        recent_course_ids = Enrollment.objects.filter(
+            date_enrolled__gte=timezone.now() - timedelta(days=30),
+            is_active=True
+        ).values_list('course_id', flat=True).distinct()
+        
+        for course_id in recent_course_ids:
+            cache_key = f"course_duration_v8_{course_id}"
+            
+            # Only calculate if not cached
+            if not cache.get(cache_key):
+                try:
+                    course = Course.objects.prefetch_related('curriculum').get(id=course_id)
+                    total_duration = sum(
+                        _estimate_video_duration_simple(item.video_url)
+                        for item in course.curriculum.all()
+                    )
+                    cache.set(cache_key, total_duration, 86400)
+                    
+                except Course.DoesNotExist:
+                    continue
+        
+        return f"Pre-warmed {len(recent_course_ids)} course duration caches"
+        
+    except Exception as e:
+        logger.error(f"Cache pre-warming failed: {str(e)}")
+        return f"Failed: {str(e)}"
+
+def _estimate_video_duration_simple(video_url):
+    """Simple, fast duration estimation"""
+    if not video_url:
+        return 10
+    
+    # Very basic estimation without expensive operations
+    if any(keyword in video_url.lower() for keyword in ['intro', 'overview']):
+        return 8
+    elif any(keyword in video_url.lower() for keyword in ['detail', 'deep', 'advanced']):
+        return 20
+    else:
+        return 12  # Average
+
 @shared_task
 def send_push_notification(user_id, title, message, data=None):
     """
-    Send push notification to all active devices of a user
-    
-    Args:
-        user_id (int): User ID
-        title (str): Notification title
-        message (str): Notification body
-        data (dict): Additional data payload
-        
-    Returns:
-        dict: Result summary
+    Optimized push notification sending
     """
     try:
-        user = User.objects.get(id=user_id)
+        # Use select_related to avoid extra query
+        user = User.objects.select_related().get(id=user_id)
         
         # Create notification in database first
         Notification.objects.create(
@@ -36,58 +80,36 @@ def send_push_notification(user_id, title, message, data=None):
             is_seen=False
         )
         
-        # Get all active devices for the user
-        devices = FCMDevice.objects.filter(user_id=user_id, active=True)
+        # Get active devices with single query
+        devices = FCMDevice.objects.filter(user_id=user_id, active=True).only('registration_id')
         
         if not devices.exists():
-            logger.info(f"No active devices found for user {user_id}")
             return {
                 'status': 'success',
                 'message': f'No active devices for user {user_id}',
-                'devices_count': 0,
-                'success_count': 0,
-                'failure_count': 0
+                'devices_count': 0
             }
         
-        # Extract registration tokens
+        # Extract tokens efficiently
         tokens = [device.registration_id for device in devices]
         
-        # Send notifications using Firebase
+        # Send bulk notifications
         results = send_bulk_notifications(tokens, title, message, data or {})
-        
-        # Log invalid/unregistered tokens and deactivate them
-        for device in devices:
-            try:
-                # Try sending to individual device to identify invalid tokens
-                success = send_firebase_message(device.registration_id, title, message, data)
-                if not success:
-                    # Deactivate device if token is invalid
-                    device.active = False
-                    device.save()
-                    logger.warning(f"Deactivated invalid device token for user {user_id}")
-            except Exception as e:
-                logger.error(f"Error processing device {device.id}: {e}")
         
         return {
             'status': 'success',
             'message': f'Push notification sent to user {user_id}',
             'devices_count': len(tokens),
-            'success_count': results['success_count'],
-            'failure_count': results['failure_count']
+            'success_count': results.get('success_count', 0),
+            'failure_count': results.get('failure_count', 0)
         }
         
     except User.DoesNotExist:
         logger.error(f"User {user_id} not found")
-        return {
-            'status': 'error',
-            'message': f'User {user_id} not found'
-        }
+        return {'status': 'error', 'message': f'User {user_id} not found'}
     except Exception as e:
         logger.error(f"Error sending push notification to user {user_id}: {e}")
-        return {
-            'status': 'error',
-            'message': f'Failed to send push notification: {str(e)}'
-        }
+        return {'status': 'error', 'message': f'Failed to send push notification: {str(e)}'}
 
 @shared_task
 def send_subscription_expiry_reminder(subscription_id=None):
@@ -511,3 +533,301 @@ def deactivate_expired_enrollments():
 
 
 
+@shared_task(bind=True, max_retries=3)
+def generate_presigned_url_async(self, curriculum_id):
+    """
+    Generate presigned URL for single curriculum item
+    """
+    try:
+        item = CourseCurriculum.objects.get(id=curriculum_id)
+        
+        # Update status to processing
+        item.url_generation_status = 'processing'
+        item.generation_attempts += 1
+        item.last_generation_attempt = timezone.now()
+        item.save(update_fields=['url_generation_status', 'generation_attempts', 'last_generation_attempt'])
+        
+        if not item.video_url:
+            item.url_generation_status = 'not_needed'
+            item.save(update_fields=['url_generation_status'])
+            return f"No video URL for curriculum {curriculum_id}"
+        
+        if not is_s3_url(item.video_url):
+            item.url_generation_status = 'not_needed'
+            item.save(update_fields=['url_generation_status'])
+            return f"Non-S3 URL for curriculum {curriculum_id}"
+        
+        # Generate presigned URL with 25-hour expiration (slightly longer than daily refresh)
+        presigned_url = generate_presigned_url(item.video_url, expiration=90000)  # 25 hours
+        
+        # Update item with generated URL
+        item.presigned_url = presigned_url
+        item.presigned_expires_at = timezone.now() + timedelta(hours=25)
+        item.url_generation_status = 'ready'
+        item.save(update_fields=['presigned_url', 'presigned_expires_at', 'url_generation_status'])
+        
+        # Clear any related caches
+        cache.delete(f"course_detail_v8_{item.course_id}")
+        cache.delete(f"course_curriculum_v8_{item.course_id}")
+        cache.delete(f"course_duration_v8_{item.course_id}")  # Clear duration cache
+        
+        logger.info(f"Generated presigned URL for curriculum {curriculum_id}")
+        return f"Generated presigned URL for curriculum {curriculum_id}"
+        
+    except CourseCurriculum.DoesNotExist:
+        logger.error(f"Curriculum {curriculum_id} does not exist")
+        return f"Curriculum {curriculum_id} does not exist"
+        
+    except Exception as e:
+        logger.error(f"Failed to generate presigned URL for curriculum {curriculum_id}: {str(e)}")
+        
+        # Update status to failed
+        try:
+            item = CourseCurriculum.objects.get(id=curriculum_id)
+            item.url_generation_status = 'failed'
+            item.save(update_fields=['url_generation_status'])
+        except:
+            pass
+        
+        # Retry with exponential backoff
+        if self.request.retries < self.max_retries:
+            countdown = 60 * (2 ** self.request.retries)  # 60s, 120s, 240s
+            raise self.retry(countdown=countdown)
+        
+        return f"Failed to generate presigned URL for curriculum {curriculum_id}: {str(e)}"
+
+
+
+@shared_task
+def regenerate_all_presigned_urls():
+    """
+    Daily task to regenerate all presigned URLs (runs at 11:50 PM)
+    """
+    try:
+        # Get all curriculum items that need URL generation
+        curriculum_items = CourseCurriculum.objects.filter(
+            video_url__isnull=False
+        ).exclude(
+            video_url__exact=''
+        ).values_list('id', flat=True)
+        
+        total_items = len(curriculum_items)
+        logger.info(f"Starting daily regeneration of {total_items} presigned URLs")
+        
+        # Queue all items for regeneration with staggered execution
+        for i, curriculum_id in enumerate(curriculum_items):
+            # Stagger the execution to avoid overwhelming AWS API
+            countdown = i * 2  # 2 seconds between each request
+            generate_presigned_url_async.apply_async(
+                args=[curriculum_id],
+                countdown=countdown,
+                queue='url_generation'
+            )
+        
+        return f"Queued {total_items} items for presigned URL regeneration"
+        
+    except Exception as e:
+        logger.error(f"Failed to queue presigned URL regeneration: {str(e)}")
+        return f"Failed: {str(e)}"
+    
+    
+@shared_task
+def cleanup_expired_presigned_urls():
+    """
+    Clean up expired presigned URLs (runs every 6 hours)
+    """
+    try:
+        expired_count = CourseCurriculum.objects.filter(
+            presigned_expires_at__lt=timezone.now(),
+            url_generation_status='ready'
+        ).update(
+            url_generation_status='expired',
+            presigned_url='',
+            presigned_expires_at=None
+        )
+        
+        logger.info(f"Marked {expired_count} presigned URLs as expired")
+        return f"Cleaned up {expired_count} expired URLs"
+        
+    except Exception as e:
+        logger.error(f"Failed to cleanup expired URLs: {str(e)}")
+        return f"Failed: {str(e)}"
+
+
+@shared_task
+def clear_stale_caches():
+    """
+    Clear stale caches periodically
+    """
+    try:
+        # Clear old enrollment caches (pattern-based clearing would be better with Redis SCAN)
+        # This is a simplified version - in production, use Redis SCAN for pattern deletion
+        cache_keys_to_clear = []
+        
+        # Add specific cache keys that are commonly stale
+        for user_id in range(1, 10000):  # Adjust range based on your user count
+            for suffix in ['true', 'false']:
+                key_data = f"enrollments_v7_{user_id}_{suffix}"
+                cache_key = hashlib.md5(key_data.encode()).hexdigest()
+                cache_keys_to_clear.append(cache_key)
+                
+                if len(cache_keys_to_clear) >= 1000:  # Process in batches
+                    cache.delete_many(cache_keys_to_clear)
+                    cache_keys_to_clear = []
+        
+        if cache_keys_to_clear:
+            cache.delete_many(cache_keys_to_clear)
+            
+        return "Cleared stale caches"
+        
+    except Exception as e:
+        logger.error(f"Failed to clear stale caches: {str(e)}")
+        return f"Failed: {str(e)}"
+    
+    
+@shared_task
+def monitor_failed_url_generations():
+    """
+    Monitor and alert for failed URL generations
+    """
+    try:
+        failed_items = CourseCurriculum.objects.filter(
+            url_generation_status='failed',
+            generation_attempts__gte=3,
+            video_url__isnull=False
+        ).exclude(video_url__exact='')
+        
+        if failed_items.exists():
+            count = failed_items.count()
+            logger.warning(f"Found {count} curriculum items with failed URL generation")
+            
+            # Send notification to admins
+            admin_users = User.objects.filter(is_staff=True)
+            for admin in admin_users:
+                Notification.objects.create(
+                    user=admin,
+                    title=f"URL Generation Failures",
+                    message=f"{count} videos failed URL generation after multiple attempts",
+                    notification_type='SYSTEM'
+                )
+        
+        return f"Monitored failed generations: {failed_items.count() if failed_items.exists() else 0} failures"
+        
+    except Exception as e:
+        logger.error(f"Failed to monitor URL generations: {str(e)}")
+        return f"Failed: {str(e)}"
+    
+    
+@shared_task
+def refresh_expiring_presigned_urls():
+    """
+    Daily task to refresh presigned URLs that are expiring soon
+    """
+    # Find URLs expiring in the next 2 hours
+    expiring_soon = CourseCurriculum.objects.filter(
+        url_generation_status='ready',
+        presigned_expires_at__lt=timezone.now() + timedelta(hours=2),
+        video_url__isnull=False
+    ).exclude(video_url='')
+    
+    count = 0
+    for curriculum in expiring_soon:
+        # Mark as expired and queue for regeneration
+        curriculum.url_generation_status = 'expired'
+        curriculum.save()
+        
+        # Queue for regeneration with staggered timing to avoid overwhelming AWS
+        generate_presigned_url_async.apply_async(
+            args=[curriculum.id],
+            countdown=count * 2  # 2 second intervals
+        )
+        count += 1
+    
+    logger.info(f"Queued {count} URLs for refresh")
+    return f"Queued {count} URLs for refresh"
+
+@shared_task
+def bulk_generate_missing_urls():
+    """
+    Task to generate URLs for items that don't have them yet
+    """
+    missing_urls = CourseCurriculum.objects.filter(
+        video_url__isnull=False,
+        url_generation_status__in=['pending', 'failed']
+    ).exclude(video_url='')[:100]  # Process 100 at a time
+    
+    count = 0
+    for curriculum in missing_urls:
+        if is_s3_url(curriculum.video_url):
+            generate_presigned_url_async.apply_async(
+                args=[curriculum.id],
+                countdown=count * 1  # 1 second intervals
+            )
+            count += 1
+    
+    logger.info(f"Queued {count} missing URLs for generation")
+    return f"Queued {count} missing URLs for generation"
+
+@shared_task
+def cleanup_failed_url_generations():
+    """
+    Retry failed URL generations periodically
+    """
+    failed_items = CourseCurriculum.objects.filter(
+        url_generation_status='failed',
+        video_url__isnull=False
+    ).exclude(video_url='')[:50]  # Retry 50 at a time
+    
+    count = 0
+    for curriculum in failed_items:
+        if is_s3_url(curriculum.video_url):
+            # Reset to pending and retry
+            curriculum.url_generation_status = 'pending'
+            curriculum.save()
+            
+            generate_presigned_url_async.apply_async(
+                args=[curriculum.id],
+                countdown=count * 5  # 5 second intervals for failed items
+            )
+            count += 1
+    
+    logger.info(f"Retrying {count} failed URL generations")
+    return f"Retrying {count} failed URL generations"
+
+# Add to your existing tasks
+@shared_task
+def warm_cache_for_popular_content():
+    return None
+#     """
+#     Pre-warm cache for popular courses and recent enrollments
+#     """
+#     from django.db.models import Count
+
+    
+#     # Warm popular courses
+#     # CacheWarmingService.warm_popular_courses()
+    
+#     # Warm recent user enrollments
+#     from core.models import Enrollment
+#     recent_users = Enrollment.objects.filter(
+#         date_enrolled__gte=timezone.now() - timedelta(days=7)
+#     ).values_list('user_id', flat=True).distinct()[:100]
+    
+#     for user_id in recent_users:
+#         CacheWarmingService.warm_user_enrollments(user_id)
+    
+#     return f"Cache warmed for popular content and {len(recent_users)} recent users"
+
+
+@shared_task
+def bulk_process_new_curriculum():
+    """Process multiple curriculum items in batches"""
+    pending_items = CourseCurriculum.objects.filter(
+        url_generation_status='pending'
+    )[:50]  # Process 50 at a time
+    
+    for item in pending_items:
+        generate_presigned_url_async.apply_async(
+            args=[item.id],
+            countdown=random.randint(1, 10)  # Spread the load
+        )

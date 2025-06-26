@@ -489,31 +489,28 @@ def process_course_purchase(user, course, plan_type, razorpay_payment_id, razorp
             
 def clear_enrollment_cache(user_id):
     """
-    Utility function to clear all enrollment-related cache for a user.
-    Call this whenever enrollment data is modified outside of the model save.
+    Utility function to clear all enrollment-related cache for a user - UPDATED TO v8
     """
     from django.core.cache import cache
     import hashlib
     import logging
     
     logger = logging.getLogger(__name__)
-    logger.info(f"🧹 [Services] Clearing enrollment cache for user {user_id}")
+    logger.info(f"🧹 [Services] Clearing enrollment cache v8 for user {user_id}")
     
-    # Clear main enrollment list cache (both show_all variants)
+    # Clear main enrollment list cache (both show_all variants) - v8
     for show_all in ['true', 'false']:
-        key_data = f"enrollments_v6_{user_id}_{show_all}"
+        key_data = f"enrollments_v8_{user_id}_list_{show_all}"
         cache_key = hashlib.md5(key_data.encode()).hexdigest()
         cache.delete(cache_key)
-        logger.debug(f"Cleared enrollment list cache: {cache_key}")
+        logger.debug(f"Cleared enrollment list cache v8: {cache_key}")
     
-    # Clear enrollment summary cache
-    summary_cache_key = f"enrollment_summary_v3_{user_id}"
+    # Clear enrollment summary cache - v8
+    summary_cache_key = f"enrollment_summary_v8_{user_id}"
     cache.delete(summary_cache_key)
-    logger.debug(f"Cleared enrollment summary cache: {summary_cache_key}")
+    logger.debug(f"Cleared enrollment summary cache v8: {summary_cache_key}")
     
-    logger.info(f"✅ [Services] Cleared enrollment cache for user {user_id}")
-    
-    
+    logger.info(f"✅ [Services] Cleared enrollment cache v8 for user {user_id}")
     
     
     

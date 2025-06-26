@@ -120,6 +120,7 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
      'allauth.account.middleware.AccountMiddleware',
+     'django.middleware.gzip.GZipMiddleware',
 ]
 
 AUTHENTICATION_BACKENDS = [
@@ -135,6 +136,9 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
     ],
+      'PAGE_SIZE': 25,
+    'PAGINATE_BY_PARAM': 'page_size',
+    'MAX_PAGINATE_BY': 100,
 }
 
 SITE_ID = 1
@@ -232,6 +236,43 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'core.tasks.send_subscription_expiry_reminder',
         'schedule': crontab(hour=9, minute=0),  # Run daily at 9 AM
     },
+    'pre-warm-duration-caches': {
+        'task': 'core.tasks.pre_warm_duration_caches',
+        'schedule': crontab(hour=3, minute=0),  # 3 AM daily
+    },
+    'regenerate-presigned-urls': {
+        'task': 'core.tasks.regenerate_all_presigned_urls',
+        'schedule': crontab(hour=23, minute=50),  # 11:50 PM daily
+    },
+    'cleanup-expired-urls': {
+        'task': 'core.tasks.cleanup_expired_presigned_urls',
+        'schedule': crontab(minute=0, hour='*/6'),  # Every 6 hours
+    },
+    'monitor-failed-generations': {
+        'task': 'core.tasks.monitor_failed_url_generations',
+        'schedule': crontab(minute=30),  # Every hour at 30 minutes
+    },
+    
+     'clear-stale-caches': {
+        'task': 'core.tasks.clear_stale_caches',
+        'schedule': crontab(minute=0, hour='*/4'),  # Every 4 hours
+    },
+    
+    # Your existing schedules...
+    'send-subscription-expiry-reminder': {
+        'task': 'core.tasks.send_subscription_expiry_reminder',
+        'schedule': crontab(hour=9, minute=0),
+    },
+    
+    'deactivate-expired-subscriptions': {
+        'task': 'core.tasks.deactivate_expired_subscriptions',
+        'schedule': crontab(hour=0, minute=30),
+    },
+    
+    'cleanup-expired-otps': {
+        'task': 'core.tasks.cleanup_expired_otps',
+        'schedule': crontab(hour=2, minute=0),
+    },
     'deactivate_expired_subscriptions': {
         'task': 'core.tasks.deactivate_expired_subscriptions',
         'schedule': crontab(hour=0, minute=0),  # Run daily at midnight
@@ -244,6 +285,26 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'core.tasks.cleanup_expired_otps',
         'schedule': crontab(hour='*/3', minute=0),  # Run every 3 hours
     },
+}
+
+CELERY_TASK_ANNOTATIONS = {
+    'core.tasks.generate_presigned_url_async': {'rate_limit': '100/m'},
+    'core.tasks.send_push_notification': {'rate_limit': '1000/m'},
+}
+
+CELERY_TASK_ROUTES = {
+    'core.tasks.generate_presigned_url_async': {
+        'queue': 'url_generation',
+        'routing_key': 'url_generation',
+    },
+    'core.tasks.regenerate_all_presigned_urls': {
+        'queue': 'bulk_operations',
+        'routing_key': 'bulk_operations',
+    },
+    'core.tasks.send_push_notification': {
+        'queue': 'notifications',
+        'routing_key': 'notifications',
+    }
 }
 
 
@@ -290,6 +351,8 @@ CACHES = {
         'KEY_PREFIX': 'sessions',
     }
 }
+
+
 SESSION_ENGINE = 'django.contrib.sessions.backends.cache'
 SESSION_CACHE_ALIAS = 'sessions'
 
@@ -318,13 +381,16 @@ DATABASES = {
         'PASSWORD': os.environ.get('DB_PASSWORD'),
         'HOST': os.environ.get('DB_HOST', 'localhost'),
         'PORT': os.environ.get('DB_PORT', '3306'),
-        'CONN_MAX_AGE': 300,  # 10 minutes
+        'CONN_MAX_AGE': 3600,  # 10 minutes
+          'MAX_CONNS': 20,
         'OPTIONS': {
             'charset': 'utf8mb4',
             'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
             'sql_mode': 'STRICT_TRANS_TABLES',
             # Connection pool settings
           'isolation_level': 'read committed',
+        
+           
         },
     }
 }

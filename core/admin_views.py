@@ -715,22 +715,29 @@ class AdminAllStudentsView(generics.ListAPIView):
         }
     )
     def get(self, request, *args, **kwargs):
-        # Get query parameters
-        search = request.query_params.get('search')
-        enrollment_status = request.query_params.get('enrollment_status')
-        is_active = request.query_params.get('is_active')
-        date_joined_after = request.query_params.get('date_joined_after')
-        date_joined_before = request.query_params.get('date_joined_before')
-        min_spent = request.query_params.get('min_spent')
-        ordering = request.query_params.get('ordering', '-date_joined')
+        # Add caching for admin requests
+        search = request.query_params.get('search', '')
+        enrollment_status = request.query_params.get('enrollment_status', '')
+        page = request.query_params.get('page', '1')
         
-        # Base query for all students (non-staff users)
+        # Generate cache key for admin queries
+        cache_key_data = f"admin_all_students_v8_{search}_{enrollment_status}_{page}"
+        cache_key = hashlib.md5(cache_key_data.encode()).hexdigest()
+        
+        cached_data = cache.get(cache_key)
+        if cached_data:
+            return Response(cached_data)
+        
+        # OPTIMIZED query with minimal data loading
         students_query = User.objects.filter(
             is_staff=False,
             is_superuser=False
+        ).select_related().only(
+            'id', 'email', 'full_name', 'phone_number', 'date_of_birth', 
+            'is_active', 'date_joined'
         )
         
-        # Apply search filter
+        # Apply search filter efficiently
         if search:
             students_query = students_query.filter(
                 Q(email__icontains=search) |
@@ -738,103 +745,76 @@ class AdminAllStudentsView(generics.ListAPIView):
                 Q(phone_number__icontains=search)
             )
         
-        # Apply active status filter
+        # Apply other filters...
+        is_active = request.query_params.get('is_active')
         if is_active is not None:
             is_active_bool = is_active.lower() == 'true'
             students_query = students_query.filter(is_active=is_active_bool)
         
-        # Apply date filters
-        if date_joined_after:
-            try:
-                from datetime import datetime
-                date_after = datetime.strptime(date_joined_after, '%Y-%m-%d').date()
-                students_query = students_query.filter(date_joined__date__gte=date_after)
-            except ValueError:
-                pass  # Ignore invalid date format
-        
-        if date_joined_before:
-            try:
-                from datetime import datetime
-                date_before = datetime.strptime(date_joined_before, '%Y-%m-%d').date()
-                students_query = students_query.filter(date_joined__date__lte=date_before)
-            except ValueError:
-                pass  # Ignore invalid date format
-        
-        # Prefetch enrollments for efficient querying
-        students_query = students_query.prefetch_related(
-            Prefetch(
-                'enrollments',
-                queryset=Enrollment.objects.select_related('course')
-            )
+        # OPTIMIZED: Add enrollment annotations directly in query
+        students_query = students_query.annotate(
+            total_enrollments=Count('enrollments'),
+            active_enrollments=Count('enrollments', filter=Q(enrollments__is_active=True)),
+            total_spent=Sum('enrollments__amount_paid', filter=Q(enrollments__is_active=True))
         )
         
-        # Get all students
-        students = list(students_query)
+        # Apply enrollment filters using annotations
+        if enrollment_status:
+            if enrollment_status == 'enrolled':
+                students_query = students_query.filter(total_enrollments__gt=0)
+            elif enrollment_status == 'not_enrolled':
+                students_query = students_query.filter(total_enrollments=0)
+            elif enrollment_status == 'active_enrolled':
+                students_query = students_query.filter(active_enrollments__gt=0)
         
-        # Calculate stats for each student and apply additional filters
-        students_with_info = []
-        for student in students:
-            enrollment_info = self._calculate_enrollment_info(student)
-            quick_stats = self._calculate_quick_stats(student, enrollment_info)
-            
-            # Apply enrollment status filter
-            if enrollment_status:
-                if enrollment_status == 'enrolled' and not enrollment_info['is_enrolled']:
-                    continue
-                elif enrollment_status == 'not_enrolled' and enrollment_info['is_enrolled']:
-                    continue
-                elif enrollment_status == 'active_enrolled' and enrollment_info['enrollment_status'] != 'active_enrolled':
-                    continue
-                elif enrollment_status == 'expired_enrolled' and enrollment_info['enrollment_status'] != 'expired_enrolled':
-                    continue
-            
-            # Apply minimum spent filter
-            if min_spent:
-                try:
-                    min_spent_float = float(min_spent)
-                    if float(enrollment_info['total_spent']) < min_spent_float:
-                        continue
-                except ValueError:
-                    pass
-            
-            students_with_info.append({
-                'student': UserDetailsSerializer(student).data,
-                'enrollment_info': enrollment_info,
-                'quick_stats': quick_stats,
-                # Add sortable fields for ordering
-                '_total_spent_numeric': float(enrollment_info['total_spent']),
-                '_enrollment_count_numeric': enrollment_info['total_enrollments'],
-                '_date_joined': student.date_joined
-            })
+        min_spent = request.query_params.get('min_spent')
+        if min_spent:
+            try:
+                min_spent_float = float(min_spent)
+                students_query = students_query.filter(total_spent__gte=min_spent_float)
+            except ValueError:
+                pass
         
-        # Apply ordering
-        if ordering:
-            reverse = ordering.startswith('-')
-            field = ordering.lstrip('-')
-            
-            if field == 'total_spent':
-                students_with_info.sort(key=lambda x: x['_total_spent_numeric'], reverse=reverse)
-            elif field == 'enrollment_count':
-                students_with_info.sort(key=lambda x: x['_enrollment_count_numeric'], reverse=reverse)
-            elif field == 'date_joined':
-                students_with_info.sort(key=lambda x: x['_date_joined'], reverse=reverse)
-            else:
-                # Default ordering by date_joined (newest first)
-                students_with_info.sort(key=lambda x: x['_date_joined'], reverse=True)
+        # Optimize ordering
+        ordering = request.query_params.get('ordering', '-date_joined')
+        if ordering.lstrip('-') in ['total_spent', 'total_enrollments', 'date_joined']:
+            students_query = students_query.order_by(ordering)
         
-        # Remove helper fields before pagination
-        for student_info in students_with_info:
-            student_info.pop('_total_spent_numeric', None)
-            student_info.pop('_enrollment_count_numeric', None)
-            student_info.pop('_date_joined', None)
+        # PAGINATION with limit
+        students_query = students_query[:1000]  # Hard limit for admin queries
+        
+        # Build response efficiently
+        students_data = []
+        for student in students_query:
+            student_data = {
+                'student': {
+                    'id': student.id,
+                    'email': student.email,
+                    'full_name': student.full_name,
+                    'phone_number': student.phone_number,
+                    'date_of_birth': student.date_of_birth,
+                    'is_active': student.is_active,
+                    'date_joined': student.date_joined,
+                    'profile_picture_url': student.get_profile_picture_url()
+                },
+                'enrollment_info': {
+                    'is_enrolled': student.total_enrollments > 0,
+                    'total_enrollments': student.total_enrollments or 0,
+                    'active_enrollments': student.active_enrollments or 0,
+                    'expired_enrollments': (student.total_enrollments or 0) - (student.active_enrollments or 0),
+                    'total_spent': f"{student.total_spent or 0:.2f}",
+                    'enrollment_status': 'active_enrolled' if student.active_enrollments else ('enrolled' if student.total_enrollments else 'not_enrolled'),
+                    'status_message': f"Has {student.active_enrollments or 0} active enrollments" if student.active_enrollments else ("No enrollments yet" if not student.total_enrollments else "All enrollments expired")
+                }
+            }
+            students_data.append(student_data)
         
         # Manual pagination
         from django.core.paginator import Paginator
-        paginator = Paginator(students_with_info, 25)  # 25 students per page
+        paginator = Paginator(students_data, 25)
         page_number = request.query_params.get('page', 1)
         page_obj = paginator.get_page(page_number)
         
-        # Build response with pagination
         response_data = {
             'count': paginator.count,
             'next': None,
@@ -844,20 +824,12 @@ class AdminAllStudentsView(generics.ListAPIView):
         
         # Add pagination URLs
         if page_obj.has_next():
-            next_url = request.build_absolute_uri()
-            if '?' in next_url:
-                next_url += f"&page={page_obj.next_page_number()}"
-            else:
-                next_url += f"?page={page_obj.next_page_number()}"
-            response_data['next'] = next_url
-            
+            response_data['next'] = f"{request.build_absolute_uri()}?page={page_obj.next_page_number()}"
         if page_obj.has_previous():
-            prev_url = request.build_absolute_uri()
-            if '?' in prev_url:
-                prev_url += f"&page={page_obj.previous_page_number()}"
-            else:
-                prev_url += f"?page={page_obj.previous_page_number()}"
-            response_data['previous'] = prev_url
+            response_data['previous'] = f"{request.build_absolute_uri()}?page={page_obj.previous_page_number()}"
+        
+        # Cache for 5 minutes (admin data changes less frequently)
+        cache.set(cache_key, response_data, 300)
         
         return Response(response_data, status=status.HTTP_200_OK)
     
@@ -2818,151 +2790,131 @@ class AdminStudentEnrollmentsView(generics.RetrieveAPIView):
         }
     )
     def get(self, request, user_id, *args, **kwargs):
-        try:
-            # Get the student
-            student = User.objects.get(pk=user_id, is_staff=False, is_superuser=False)
-        except User.DoesNotExist:
-            return Response(
-                {'error': 'Student not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+        # Add caching for admin enrollment details
+        cache_key = f"admin_student_enrollments_v8_{user_id}"
+        cached_data = cache.get(cache_key)
         
-        # Get query parameters for filtering
+        if cached_data:
+            return Response(cached_data)
+        
+        try:
+            # OPTIMIZED query with minimal data loading
+            student = User.objects.select_related().only(
+                'id', 'email', 'full_name', 'phone_number', 'date_of_birth'
+            ).get(pk=user_id, is_staff=False, is_superuser=False)
+        except User.DoesNotExist:
+            return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Get filters
         include_inactive = request.query_params.get('include_inactive', 'false').lower() == 'true'
         plan_type_filter = request.query_params.get('plan_type')
         status_filter = request.query_params.get('status')
         
-        # Build enrollment query with optimized database access
-        enrollment_query = Enrollment.objects.select_related(
-            'course',
-            'course__category'
-        ).filter(user=student)
+        # OPTIMIZED enrollment query
+        enrollment_query = Enrollment.objects.filter(user=student).select_related(
+            'course', 'course__category'
+        ).only(
+            'id', 'date_enrolled', 'plan_type', 'expiry_date', 'amount_paid', 'is_active',
+            'course__id', 'course__title', 'course__image', 'course__category__name', 'course__location'
+        )
         
-        # Apply filters
         if not include_inactive:
             enrollment_query = enrollment_query.filter(is_active=True)
         
         if plan_type_filter:
             enrollment_query = enrollment_query.filter(plan_type=plan_type_filter)
         
-        # Get enrollments
         enrollments = list(enrollment_query.order_by('-date_enrolled'))
         
-        # Apply status filter (needs to be done after fetching due to computed fields)
+        # Build response data efficiently
+        enrollment_data = []
+        for enrollment in enrollments:
+            enrollment_item = {
+                'id': enrollment.id,
+                'course': enrollment.course.id,
+                'course_title': enrollment.course.title,
+                'course_image': enrollment.course.image.url if enrollment.course.image else None,
+                'course_category': enrollment.course.category.name if enrollment.course.category else None,
+                'course_location': enrollment.course.location,
+                'date_enrolled': enrollment.date_enrolled,
+                'plan_type': enrollment.plan_type,
+                'plan_name': enrollment.get_plan_type_display(),
+                'expiry_date': enrollment.expiry_date,
+                'amount_paid': str(enrollment.amount_paid),
+                'is_active': enrollment.is_active,
+                'is_expired': enrollment.is_expired,
+                'days_remaining': enrollment.get_days_remaining(),
+                'enrollment_status': self._get_enrollment_status_fast(enrollment)
+            }
+            enrollment_data.append(enrollment_item)
+        
+        # Apply status filter
         if status_filter:
             filtered_enrollments = []
-            for enrollment in enrollments:
-                enrollment_status = self._get_enrollment_status(enrollment)
-                if status_filter == 'active' and enrollment_status['status'] in ['active', 'active_lifetime']:
-                    filtered_enrollments.append(enrollment)
-                elif status_filter == 'expired' and enrollment_status['status'] == 'expired':
-                    filtered_enrollments.append(enrollment)
-                elif status_filter == 'expiring_soon' and enrollment_status['status'] == 'expiring_soon':
-                    filtered_enrollments.append(enrollment)
-                elif status_filter == 'inactive' and enrollment_status['status'] == 'inactive':
-                    filtered_enrollments.append(enrollment)
-            enrollments = filtered_enrollments
+            for item in enrollment_data:
+                if (status_filter == 'active' and item['enrollment_status']['status'] in ['active', 'active_lifetime'] or
+                    status_filter == 'expired' and item['enrollment_status']['status'] == 'expired' or
+                    status_filter == 'expiring_soon' and item['enrollment_status']['status'] == 'expiring_soon'):
+                    filtered_enrollments.append(item)
+            enrollment_data = filtered_enrollments
         
-        # Serialize enrollments
-        enrollment_serializer = StudentEnrollmentDetailSerializer(enrollments, many=True)
-        
-        # Calculate summary statistics
-        summary = self._calculate_enrollment_summary(enrollments)
-        
-        # Serialize student information
-        student_serializer = UserDetailsSerializer(student)
+        # Calculate summary
+        summary = self._calculate_enrollment_summary_fast(enrollment_data)
         
         response_data = {
-            'student': student_serializer.data,
+            'student': {
+                'id': student.id,
+                'email': student.email,
+                'full_name': student.full_name,
+                'phone_number': student.phone_number,
+                'date_of_birth': student.date_of_birth,
+                'profile_picture_url': student.get_profile_picture_url()
+            },
             'enrollment_summary': summary,
-            'enrollments': enrollment_serializer.data
+            'enrollments': enrollment_data
         }
+        
+        # Cache for 10 minutes
+        cache.set(cache_key, response_data, 600)
         
         return Response({"success": True, "data": response_data}, status=status.HTTP_200_OK)
     
-    def _get_enrollment_status(self, enrollment):
-        """Helper method to get enrollment status"""
+    def _get_enrollment_status_fast(self, enrollment):
+        """Fast enrollment status without DB queries"""
         if not enrollment.is_active:
-            return {
-                'status': 'inactive',
-                'message': 'Enrollment is inactive',
-                'color': 'red'
-            }
+            return {'status': 'inactive', 'message': 'Enrollment is inactive', 'color': 'red'}
         
         if enrollment.is_expired:
-            return {
-                'status': 'expired',
-                'message': 'Enrollment has expired',
-                'color': 'red'
-            }
+            return {'status': 'expired', 'message': 'Enrollment has expired', 'color': 'red'}
         
         if enrollment.plan_type == 'LIFETIME':
-            return {
-                'status': 'active_lifetime',
-                'message': 'Lifetime access',
-                'color': 'green'
-            }
+            return {'status': 'active_lifetime', 'message': 'Lifetime access', 'color': 'green'}
         
-        if enrollment.expiry_date:
-            from django.utils import timezone
-            now = timezone.now()
-            
-            if enrollment.expiry_date <= now:
-                return {
-                    'status': 'expired',
-                    'message': 'Enrollment has expired',
-                    'color': 'red'
-                }
-            
-            delta = enrollment.expiry_date - now
-            days_remaining = delta.days
-            
-            if days_remaining <= 7:
-                return {
-                    'status': 'expiring_soon',
-                    'message': f'Expires in {days_remaining} days',
-                    'color': 'orange'
-                }
+        days_remaining = enrollment.get_days_remaining()
+        if days_remaining is None:
+            return {'status': 'active', 'message': 'Active enrollment', 'color': 'green'}
         
-        return {
-            'status': 'active',
-            'message': 'Active enrollment',
-            'color': 'green'
-        }
+        if days_remaining <= 7:
+            return {'status': 'expiring_soon', 'message': f'Expires in {days_remaining} days', 'color': 'orange'}
+        
+        return {'status': 'active', 'message': f'Active - {days_remaining} days remaining', 'color': 'green'}
     
-    def _calculate_enrollment_summary(self, enrollments):
-        """Calculate summary statistics for enrollments"""
-        total_enrollments = len(enrollments)
-        active_enrollments = 0
-        expired_enrollments = 0
-        expiring_soon = 0
-        lifetime_enrollments = 0
-        total_amount_paid = 0
-        
-        for enrollment in enrollments:
-            total_amount_paid += float(enrollment.amount_paid)
-            
-            if enrollment.plan_type == 'LIFETIME':
-                lifetime_enrollments += 1
-            
-            status_info = self._get_enrollment_status(enrollment)
-            status = status_info['status']
-            
-            if status in ['active', 'active_lifetime']:
-                active_enrollments += 1
-            elif status == 'expired':
-                expired_enrollments += 1
-            elif status == 'expiring_soon':
-                expiring_soon += 1
-                active_enrollments += 1  # Expiring soon is still active
+    def _calculate_enrollment_summary_fast(self, enrollments):
+        """Fast summary calculation"""
+        total = len(enrollments)
+        active = sum(1 for e in enrollments if e['enrollment_status']['status'] in ['active', 'active_lifetime'])
+        expired = sum(1 for e in enrollments if e['enrollment_status']['status'] == 'expired')
+        expiring_soon = sum(1 for e in enrollments if e['enrollment_status']['status'] == 'expiring_soon')
+        lifetime = sum(1 for e in enrollments if e['plan_type'] == 'LIFETIME')
+        total_paid = sum(float(e['amount_paid']) for e in enrollments)
         
         return {
-            'total_enrollments': total_enrollments,
-            'active_enrollments': active_enrollments,
-            'expired_enrollments': expired_enrollments,
+            'total_enrollments': total,
+            'active_enrollments': active,
+            'expired_enrollments': expired,
             'expiring_soon': expiring_soon,
-            'lifetime_enrollments': lifetime_enrollments,
-            'total_amount_paid': f"{total_amount_paid:.2f}"
+            'lifetime_enrollments': lifetime,
+            'total_amount_paid': f"{total_paid:.2f}"
         }
 
 class AdminAllStudentsEnrollmentsView(generics.ListAPIView):

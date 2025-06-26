@@ -278,21 +278,32 @@ class CourseCurriculumSerializer(serializers.ModelSerializer):
     
     def get_video_url(self, obj):
         """
-        ALWAYS generate presigned URL for S3 videos - UNIVERSAL FIX
+        HYBRID APPROACH: Return presigned URL if ready, status info if not
+        NO AWS API calls during serialization - pure database reads only
         """
-        url = obj.video_url
-        if url and is_s3_url(url):
-            from core.s3_utils import generate_presigned_url
-            try:
-                # ALWAYS generate presigned URL regardless of context
-                presigned_url = generate_presigned_url(url, expiration=43200)  # 12 hour expiration
-                logger.debug(f"Generated presigned URL for curriculum {obj.id}")
-                return presigned_url
-            except Exception as e:
-                logger.error(f"Failed to generate presigned URL for curriculum {obj.id}: {str(e)}")
-                # Return original URL if presigned generation fails
-                return url
-        return url
+        # Case 1: Presigned URL is ready and not expired
+        if obj.is_url_ready:
+            return obj.presigned_url
+        
+        # Case 2: Non-S3 URL or URL generation not needed
+        if obj.url_generation_status == 'not_needed':
+            return obj.video_url
+        
+        # Case 3: URL not ready - return status information for frontend handling
+        status_messages = {
+            'pending': 'Video upload detected, processing will start shortly...',
+            'processing': 'Generating secure video link...',
+            'failed': 'Video processing failed. Please try refreshing the page.',
+            'expired': 'Video link expired, regenerating...'
+        }
+        
+        return {
+            'status': obj.url_generation_status,
+            'message': status_messages.get(obj.url_generation_status, 'Unknown status'),
+            'video_id': obj.id,
+            'can_retry': obj.generation_attempts < 3,
+            'last_attempt': obj.last_generation_attempt
+        }
     
     def to_representation(self, instance):
         """
@@ -324,81 +335,44 @@ class CourseListSerializer(serializers.ModelSerializer):
         ]
     
     def get_enrolled_students(self, obj):
-        """Get total number of enrolled students"""
-        try:
-            # Use prefetched enrollments if available for performance
-            if hasattr(obj, 'prefetched_objects_cache') and 'enrollments' in obj.prefetched_objects_cache:
-                return len([e for e in obj.prefetched_objects_cache['enrollments'] if e.is_active])
-            
-            # Fallback to database query
-            return obj.enrollments.filter(is_active=True).count()
-        except Exception as e:
-            logger.error(f"Error getting enrolled students count: {str(e)}")
-            return 0
+        """Optimized with annotation if available"""
+        if hasattr(obj, 'enrolled_count'):
+            return obj.enrolled_count
+        return getattr(obj, '_enrolled_students_count', 0)
     
     def get_is_enrolled(self, obj):
-        """Optimized enrollment check with caching"""
+        """Super fast enrollment check using prefetched data"""
         request = self.context.get('request')
         if not request or not request.user.is_authenticated:
             return False
         
-        # Check cache first
-        from django.core.cache import cache
-        cache_key = f"user_enrolled_{request.user.id}_{obj.id}"
-        cached_result = cache.get(cache_key)
+        # Use prefetched data if available
+        if hasattr(obj, '_user_enrollment_status'):
+            return obj._user_enrollment_status
         
-        if cached_result is not None:
-            return cached_result
+        # Fallback to checking prefetched enrollments
+        if hasattr(obj, 'prefetched_objects_cache') and 'enrollments' in obj.prefetched_objects_cache:
+            enrollments = obj.prefetched_objects_cache['enrollments']
+            for enrollment in enrollments:
+                if (enrollment.user_id == request.user.id and 
+                    enrollment.is_active and 
+                    not enrollment.is_expired):
+                    return True
         
-        try:
-            # Use prefetched data if available
-            if hasattr(obj, 'prefetched_objects_cache') and 'enrollments' in obj.prefetched_objects_cache:
-                enrollments = obj.prefetched_objects_cache['enrollments']
-                for enrollment in enrollments:
-                    if (enrollment.user_id == request.user.id and 
-                        enrollment.is_active and 
-                        not enrollment.is_expired):
-                        cache.set(cache_key, True, 600)  # Cache for 10 minutes
-                        return True
-                cache.set(cache_key, False, 600)
-                return False
-            
-            # Fallback to database query
-            enrollment = obj.enrollments.filter(
-                user=request.user,
-                is_active=True
-            ).first()
-            
-            if not enrollment:
-                result = False
-            else:
-                result = not enrollment.is_expired
-            
-            # Cache the result
-            cache.set(cache_key, result, 600)
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error checking enrollment status: {str(e)}")
-            return False
+        return False
     
     def get_is_wishlisted(self, obj):
-        """Check if course is in user's wishlist"""
+        """Fast wishlist check using prefetched data"""
         request = self.context.get('request')
         if not request or not request.user.is_authenticated:
             return False
-            
-        try:
-            # Use prefetched wishlist if available
-            if hasattr(obj, 'prefetched_objects_cache') and 'wishlisted_by' in obj.prefetched_objects_cache:
-                wishlisted_by = obj.prefetched_objects_cache['wishlisted_by']
-                return any(w.user_id == request.user.id for w in wishlisted_by)
-            
-            # Fallback to database query
-            return obj.wishlisted_by.filter(user=request.user).exists()
-        except Exception as e:
-            logger.error(f"Error checking wishlist status: {str(e)}")
-            return False
+        
+        if hasattr(obj, 'prefetched_objects_cache') and 'wishlisted_by' in obj.prefetched_objects_cache:
+            wishlisted_by = obj.prefetched_objects_cache['wishlisted_by']
+            return any(w.user_id == request.user.id for w in wishlisted_by)
+        
+        return False
+
 
 # Also create a lightweight version for the enrollment list to maintain performance
 class LightweightCourseCurriculumSerializer(serializers.ModelSerializer):
@@ -1328,20 +1302,30 @@ class LightweightEnrollmentSerializer(serializers.ModelSerializer):
             'days_remaining', 'total_curriculum', 'total_duration'
         ]
         
+    # def get_course(self, obj):
+    #     """Return minimal course data with curriculum count"""
+    #     course = obj.course
+    #     return {
+    #         'id': course.id,
+    #         'title': course.title,
+    #         'image': course.image.url if course.image else None,
+    #         'small_desc': course.small_desc,
+    #         'category_name': course.category.name if course.category else None,
+    #         'curriculum_count': getattr(course, 'curriculum_count', 0)
+    #     }
+    
     def get_is_expired(self, obj):
-        """Fast expiry check without additional queries"""
+        """Fast expiry check"""
         if obj.plan_type == 'LIFETIME':
             return False
         if not obj.expiry_date:
             return False
-        
         return obj.expiry_date <= timezone.now()
     
     def get_days_remaining(self, obj):
-        """Calculate days remaining until expiry"""
+        """Calculate days remaining"""
         if obj.plan_type == 'LIFETIME':
             return None
-        
         if not obj.expiry_date:
             return None
         
@@ -1351,221 +1335,127 @@ class LightweightEnrollmentSerializer(serializers.ModelSerializer):
         
         delta = obj.expiry_date - now
         return delta.days
-    
     def get_total_curriculum(self, obj):
-        """Get total curriculum count"""
-        try:
-            if hasattr(obj, 'curriculum_count'):
-                return obj.curriculum_count
-            
-            if hasattr(obj.course, 'prefetched_objects_cache') and 'curriculum' in obj.course.prefetched_objects_cache:
-                return len(obj.course.prefetched_objects_cache['curriculum'])
-            
-            return obj.course.curriculum.count()
-            
-        except Exception as e:
-            logger.error(f"Error getting curriculum count: {str(e)}")
-            return 0
+        """
+        ULTRA-FAST curriculum count - NO database queries
+        """
+        # Strategy 1: Use annotated value from optimized queryset (fastest)
+        if hasattr(obj, 'curriculum_count'):
+            return obj.curriculum_count
+        
+        # Strategy 2: Use annotated value on course (from prefetch)
+        if hasattr(obj.course, 'curriculum_count'):
+            return obj.course.curriculum_count
+        
+        # Strategy 3: Use prefetched data length (no DB query)
+        if hasattr(obj.course, 'prefetched_objects_cache') and 'curriculum' in obj.course.prefetched_objects_cache:
+            return len(obj.course.prefetched_objects_cache['curriculum'])
+        
+        # Strategy 4: Check if course has _curriculum_count from annotation
+        curriculum_count = getattr(obj.course, '_curriculum_count', None)
+        if curriculum_count is not None:
+            return curriculum_count
+        
+        # Fallback: Return 0 instead of making DB query
+        return 0
     
     def get_total_duration(self, obj):
-        """Calculate total duration from video URLs"""
-        try:
-            course_id = obj.course.id
-            cache_key = f"course_duration_v6_{course_id}"
-            cached_duration = cache.get(cache_key)
-            
-            if cached_duration is not None:
-                return cached_duration
-            
-            total_duration = 0
-            
-            # Get curriculum items with presigned URLs
-            if hasattr(obj.course, 'prefetched_objects_cache') and 'curriculum' in obj.course.prefetched_objects_cache:
-                curriculum_items = obj.course.prefetched_objects_cache['curriculum']
-            else:
-                curriculum_items = obj.course.curriculum.all()
-            
-            for item in curriculum_items:
-                if item.video_url:
-                    duration = self._extract_video_duration(item.video_url)
-                    total_duration += duration
-                else:
-                    total_duration += 10
-            
-            cache.set(cache_key, total_duration, 86400)
-            return total_duration
-            
-        except Exception as e:
-            logger.error(f"Error calculating total duration: {str(e)}")
-            return 0
-    
-    def _extract_video_duration(self, video_url):
-        """Extract duration from video URL - same logic as before"""
-        if not video_url:
-            return 10
+        """
+        ULTRA-FAST duration calculation with heavy caching
+        """
+        course_id = obj.course.id
         
-        url_hash = hashlib.md5(video_url.encode()).hexdigest()
-        cache_key = f"video_duration_v6_{url_hash}"
-        
+        # Strategy 1: Check cache first (sub-millisecond lookup)
+        cache_key = f"course_duration_v8_{course_id}"
         cached_duration = cache.get(cache_key)
         if cached_duration is not None:
             return cached_duration
         
-        duration = 10
+        # Strategy 2: Use prefetched data (no additional DB queries)
+        curriculum_items = []
+        if hasattr(obj.course, 'prefetched_objects_cache') and 'curriculum' in obj.course.prefetched_objects_cache:
+            curriculum_items = obj.course.prefetched_objects_cache['curriculum']
+        
+        # Strategy 3: Fast duration calculation
+        if curriculum_items:
+            total_duration = sum(
+                self._super_fast_duration_estimate(item.video_url) 
+                for item in curriculum_items
+            )
+        else:
+            # Fallback: Estimate based on curriculum count
+            curriculum_count = self.get_total_curriculum(obj)
+            total_duration = curriculum_count * 12  # 12 minutes average per video
+        
+        # Cache for 24 hours
+        cache.set(cache_key, total_duration, 86400)
+        return total_duration
+    
+    def _super_fast_duration_estimate(self, video_url):
+        """
+        Lightning-fast duration estimation - NO external API calls
+        """
+        if not video_url:
+            return 10
+        
+        # Check individual video cache first
+        url_hash = hashlib.md5(video_url.encode()).hexdigest()[:8]  # Short hash
+        cache_key = f"video_dur_v8_{url_hash}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+        
+        # Super-fast pattern matching (no regex for speed)
+        duration = 10  # Default
         
         try:
-            duration = self._get_s3_metadata_duration(video_url)
+            url_lower = video_url.lower()
             
-            if duration == 10:
-                duration = self._extract_duration_from_filename(video_url)
-                
-                if duration == 10:
-                    duration = self._estimate_duration_from_filesize(video_url)
+            # Quick pattern checks (faster than regex)
+            if '_5min_' in url_lower or '_5m_' in url_lower:
+                duration = 5
+            elif '_10min_' in url_lower or '_10m_' in url_lower:
+                duration = 10
+            elif '_15min_' in url_lower or '_15m_' in url_lower:
+                duration = 15
+            elif '_20min_' in url_lower or '_20m_' in url_lower:
+                duration = 20
+            elif '_30min_' in url_lower or '_30m_' in url_lower:
+                duration = 30
+            elif 'intro' in url_lower:
+                duration = 8
+            elif 'conclusion' in url_lower or 'summary' in url_lower:
+                duration = 6
+            elif 'demo' in url_lower or 'example' in url_lower:
+                duration = 15
+            else:
+                # Smart estimation based on filename length and content
+                if len(video_url) > 100:  # Long URLs often = longer videos
+                    duration = 18
+                elif 'advanced' in url_lower or 'detail' in url_lower:
+                    duration = 25
+                else:
+                    duration = 12  # Default reasonable estimate
         
-        except Exception as e:
-            logger.debug(f"Duration extraction failed for {video_url}: {str(e)}")
+        except Exception:
+            duration = 10  # Safe fallback
         
+        # Cache for 7 days (video durations don't change)
         cache.set(cache_key, duration, 604800)
         return duration
     
-    def _get_s3_metadata_duration(self, video_url):
-        """Extract duration from S3 metadata"""
-        try:
-            from core.s3_utils import get_s3_key_and_bucket, is_s3_url
-            from django.conf import settings
-            import boto3
-            
-            if not is_s3_url(video_url):
-                return 10
-            
-            bucket_name, object_key = get_s3_key_and_bucket(video_url)
-            if not bucket_name or not object_key:
-                return 10
-            
-            s3_client = boto3.client(
-                's3',
-                aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-                aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-                region_name=settings.AWS_REGION
-            )
-            
-            response = s3_client.head_object(Bucket=bucket_name, Key=object_key)
-            metadata = response.get('Metadata', {})
-            
-            duration_fields = [
-                'duration', 'duration-minutes', 'video-duration', 
-                'length', 'runtime', 'duration_minutes'
-            ]
-            
-            for field in duration_fields:
-                if field in metadata:
-                    try:
-                        value = float(metadata[field])
-                        if field.endswith('-seconds') or field == 'duration_seconds':
-                            return int(value / 60)
-                        else:
-                            return int(value)
-                    except (ValueError, TypeError):
-                        continue
-            
-            content_length = response.get('ContentLength', 0)
-            if content_length > 0:
-                mb_size = content_length / (1024 * 1024)
-                
-                if mb_size < 50:
-                    estimated_minutes = max(3, int(mb_size / 12))
-                elif mb_size < 200:
-                    estimated_minutes = max(3, int(mb_size / 35))
-                else:
-                    estimated_minutes = max(5, int(mb_size / 80))
-                
-                return min(estimated_minutes, 180)
-            
-        except Exception as e:
-            logger.debug(f"S3 metadata extraction failed: {str(e)}")
-        
-        return 10
-    
-    def _extract_duration_from_filename(self, video_url):
-        """Extract duration from filename patterns"""
-        try:
-            import re
-            
-            patterns = [
-                r'_(\d+)min[_\.]',        # _15min_
-                r'_(\d+)m[_\.]',          # _15m_
-                r'-(\d+)min[_\.-]',       # -15min-
-                r'-(\d+)m[_\.-]',         # -15m-
-                r'(\d+)minutes',          # 15minutes
-                r'duration[_-](\d+)',     # duration_15
-                r'(\d+)[_-]minutes',      # 15_minutes
-                r'runtime[_-](\d+)',      # runtime_15
-                r'length[_-](\d+)',       # length_15
-                r'(\d+)mins',             # 15mins
-                r'(\d{1,3})m(\d{2})s',    # 15m30s
-            ]
-            
-            for pattern in patterns:
-                match = re.search(pattern, video_url, re.IGNORECASE)
-                if match:
-                    if pattern.endswith(r'(\d{1,3})m(\d{2})s'):
-                        minutes = int(match.group(1))
-                        seconds = int(match.group(2))
-                        total_minutes = minutes + (seconds / 60)
-                        if 1 <= total_minutes <= 300:
-                            return int(total_minutes)
-                    else:
-                        duration = int(match.group(1))
-                        if 1 <= duration <= 300:
-                            return duration
-            
-        except Exception as e:
-            logger.debug(f"Filename pattern extraction failed: {str(e)}")
-        
-        return 10
-    
-    def _estimate_duration_from_filesize(self, video_url):
-        """Estimate duration from file size"""
-        try:
-            from core.s3_utils import get_s3_key_and_bucket, is_s3_url
-            from django.conf import settings
-            import boto3
-            
-            if not is_s3_url(video_url):
-                return 10
-            
-            bucket_name, object_key = get_s3_key_and_bucket(video_url)
-            if not bucket_name or not object_key:
-                return 10
-            
-            s3_client = boto3.client(
-                's3',
-                aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-                aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-                region_name=settings.AWS_REGION
-            )
-            
-            response = s3_client.head_object(Bucket=bucket_name, Key=object_key)
-            content_length = response.get('ContentLength', 0)
-            
-            if content_length > 0:
-                mb_size = content_length / (1024 * 1024)
-                
-                if mb_size < 10:
-                    return max(2, int(mb_size / 2))
-                elif mb_size < 50:
-                    return max(3, int(mb_size / 8))
-                elif mb_size < 200:
-                    return max(5, int(mb_size / 25))
-                elif mb_size < 500:
-                    return max(10, int(mb_size / 40))
-                else:
-                    return max(15, int(mb_size / 60))
-            
-        except Exception as e:
-            logger.debug(f"File size estimation failed: {str(e)}")
-        
-        return 10
+    # Keep other optimized methods...
+    def get_course(self, obj):
+        """Minimal course data - NO additional queries"""
+        course = obj.course
+        return {
+            'id': course.id,
+            'title': course.title,
+            'image': course.image.url if course.image else None,
+            'small_desc': course.small_desc,
+            'category_name': getattr(course.category, 'name', None) if hasattr(course, 'category') else None,
+            'curriculum_count': self.get_total_curriculum(obj)  # Reuse computed value
+        }
 
 
 

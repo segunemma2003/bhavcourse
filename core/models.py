@@ -104,8 +104,67 @@ class User(AbstractBaseUser, PermissionsMixin):
         indexes = [
             models.Index(fields=['email']),
             models.Index(fields=['is_active']),
+            # Add these performance indexes
+            models.Index(fields=['is_staff', 'is_superuser']),
+            models.Index(fields=['date_joined']),
+            models.Index(fields=['is_active', 'date_joined']),
         ]
-
+        
+    def save(self, *args, **kwargs):
+        is_new = self.pk is None
+        super().save(*args, **kwargs)
+        
+        # Clear user-related caches if profile updated - v8
+        if not is_new:
+            self._clear_user_caches()
+    
+    def delete(self, *args, **kwargs):
+        user_id = self.id
+        result = super().delete(*args, **kwargs)
+        self._clear_user_caches_on_delete(user_id)
+        return result
+    
+    def _clear_user_caches(self):
+        """Clear user-related caches - UPDATED TO v8"""
+        try:
+            cache_patterns = [
+                f"enrollments_v8_{self.id}_list_true",
+                f"enrollments_v8_{self.id}_list_false",
+                f"enrollment_summary_v8_{self.id}",
+                f"wishlist_v8_{self.id}",
+                f"notifications_v8_{self.id}_all",
+                f"notifications_v8_{self.id}_true",
+                f"notifications_v8_{self.id}_false",
+            ]
+            
+            # Clear admin caches that might include this user
+            cache_patterns.extend([
+                "admin_all_students_v8",  # Admin student lists
+                f"admin_student_enrollments_v8_{self.id}",  # Admin enrollment details
+            ])
+            
+            hashed_keys = [hashlib.md5(pattern.encode()).hexdigest() for pattern in cache_patterns]
+            cache.delete_many(hashed_keys)
+            
+        except Exception as e:
+            logger.warning(f"User cache clearing failed: {e}")
+    
+    @staticmethod
+    def _clear_user_caches_on_delete(user_id):
+        """Clear caches after user deletion - UPDATED TO v8"""
+        cache_patterns = [
+            f"enrollments_v8_{user_id}_list_true",
+            f"enrollments_v8_{user_id}_list_false",
+            f"enrollment_summary_v8_{user_id}",
+            f"wishlist_v8_{user_id}",
+            f"notifications_v8_{user_id}_all",
+            f"notifications_v8_{user_id}_true",
+            f"notifications_v8_{user_id}_false",
+            f"admin_student_enrollments_v8_{user_id}",
+        ]
+        
+        hashed_keys = [hashlib.md5(pattern.encode()).hexdigest() for pattern in cache_patterns]
+        cache.delete_many(hashed_keys)
 class Category(models.Model):
     name = models.CharField(max_length=100)
     image_url = models.URLField(max_length=500)
@@ -158,6 +217,8 @@ class CourseCurriculum(models.Model):
         default='pending',
         help_text='Status of presigned URL generation'
     )
+    generation_attempts = models.PositiveIntegerField(default=0)
+    last_generation_attempt = models.DateTimeField(null=True, blank=True)
     
     def __str__(self):
         return f"{self.course.title} - {self.title}"
@@ -182,17 +243,31 @@ class CourseCurriculum(models.Model):
         self._clear_related_caches()
     
     def _clear_related_caches(self):
-        """Clear caches related to this curriculum item"""
+        """Clear caches related to this curriculum item - UPDATED TO v8"""
         try:
-            # Clear course detail cache
-            cache.delete(f"course_detail_v2_{self.course_id}")
+            # Clear course detail cache - v8
+            cache.delete(f"course_detail_v8_{self.course_id}")
             
-            # Clear enrollment caches for users enrolled in this course
-            enrollment_cache_keys = [
-                f"enrollment_list_v3_{enrollment.user_id}"
-                for enrollment in self.course.enrollments.select_related('user')[:100]  # Limit to avoid memory issues
-            ]
-            cache.delete_many(enrollment_cache_keys)
+            # Clear course duration cache - v8
+            cache.delete(f"course_duration_v8_{self.course_id}")
+            
+            # Clear enrollment caches for users enrolled in this course - v8
+            enrollment_user_ids = Enrollment.objects.filter(
+                course_id=self.course_id,
+                is_active=True
+            ).values_list('user_id', flat=True)[:100]  # Limit to prevent memory issues
+            
+            enrollment_cache_keys = []
+            for user_id in enrollment_user_ids:
+                enrollment_cache_keys.extend([
+                    f"enrollments_v8_{user_id}_list_true",
+                    f"enrollments_v8_{user_id}_list_false",
+                    f"enrollment_summary_v8_{user_id}"
+                ])
+            
+            # Hash and delete cache keys
+            hashed_keys = [hashlib.md5(key.encode()).hexdigest() for key in enrollment_cache_keys]
+            cache.delete_many(hashed_keys)
             
         except Exception as e:
             logger.warning(f"Cache clearing failed: {e}")
@@ -213,6 +288,8 @@ class CourseCurriculum(models.Model):
             models.Index(fields=['course', 'order']),
             models.Index(fields=['url_generation_status', 'presigned_expires_at']),
             models.Index(fields=['course', 'url_generation_status']),
+            models.Index(fields=['presigned_expires_at']),
+            models.Index(fields=['generation_attempts', 'url_generation_status']),
         ]
         
 @receiver(post_save, sender=CourseCurriculum)
@@ -259,7 +336,80 @@ class Course(models.Model):
             models.Index(fields=['is_featured', 'date_uploaded']),
             models.Index(fields=['category']),
             models.Index(fields=['date_uploaded']),
+            # Add these performance indexes
+            models.Index(fields=['category', 'date_uploaded']),
+            models.Index(fields=['is_featured', 'category']),
+            models.Index(fields=['date_uploaded', 'is_featured']),
         ]
+        
+    def save(self, *args, **kwargs):
+        is_new = self.pk is None
+        super().save(*args, **kwargs)
+        
+        # Clear course-related caches - v8
+        self._clear_course_caches(is_new)
+    
+    def delete(self, *args, **kwargs):
+        course_id = self.id
+        result = super().delete(*args, **kwargs)
+        self._clear_course_caches_on_delete(course_id)
+        return result
+    
+    def _clear_course_caches(self, is_new=False):
+        """Clear course-related caches - UPDATED TO v8"""
+        try:
+            # Clear course detail caches
+            cache.delete(f"course_detail_v8_{self.id}")
+            cache.delete(f"course_duration_v8_{self.id}")
+            
+            # Clear course list caches (pattern-based)
+            cache_patterns = [
+                "courses_list_v8",  # All course list variations
+                f"category_detail_v8_{self.category_id}" if self.category_id else "",
+            ]
+            
+            # Clear category list cache
+            cache_patterns.append("categories_list_v8")
+            
+            # If new course, clear admin caches
+            if is_new:
+                cache_patterns.extend([
+                    "admin_all_students_v8",  # Admin views might be affected
+                ])
+            
+            # Clear enrollment caches for users enrolled in this course
+            if not is_new:  # Only for existing courses
+                enrolled_user_ids = Enrollment.objects.filter(
+                    course_id=self.id,
+                    is_active=True
+                ).values_list('user_id', flat=True)[:100]
+                
+                for user_id in enrolled_user_ids:
+                    cache_patterns.extend([
+                        f"enrollments_v8_{user_id}_list_true",
+                        f"enrollments_v8_{user_id}_list_false",
+                        f"enrollment_summary_v8_{user_id}"
+                    ])
+            
+            # Hash and delete
+            valid_patterns = [p for p in cache_patterns if p]  # Remove empty strings
+            hashed_keys = [hashlib.md5(pattern.encode()).hexdigest() for pattern in valid_patterns]
+            cache.delete_many(hashed_keys)
+            
+        except Exception as e:
+            logger.warning(f"Course cache clearing failed: {e}")
+    
+    def _clear_course_caches_on_delete(self, course_id):
+        """Clear caches after course deletion - UPDATED TO v8"""
+        cache_patterns = [
+            f"course_detail_v8_{course_id}",
+            f"course_duration_v8_{course_id}",
+            "courses_list_v8",
+            "categories_list_v8",
+        ]
+        
+        hashed_keys = [hashlib.md5(pattern.encode()).hexdigest() for pattern in cache_patterns]
+        cache.delete_many(hashed_keys)
 
 class Enrollment(models.Model):
     user = models.ForeignKey(User, related_name='enrollments', on_delete=models.CASCADE)
@@ -284,6 +434,10 @@ class Enrollment(models.Model):
             models.Index(fields=['expiry_date']),
             models.Index(fields=['plan_type']),
             models.Index(fields=['is_active', 'date_enrolled']),
+            # Add these performance indexes
+            models.Index(fields=['user', 'is_active', 'date_enrolled']),
+            models.Index(fields=['is_active', 'expiry_date']),
+            models.Index(fields=['user', 'course', 'is_active']),
         ]
     
     def __str__(self):
@@ -335,25 +489,39 @@ class Enrollment(models.Model):
     
     @staticmethod
     def _clear_enrollment_caches_for_user(user_id):
-        """Clear all enrollment cache variations for a user"""
+        """Clear all enrollment cache variations for a user - UPDATED TO v8"""
         cache_patterns = [
-            f"enrollments_v6_{user_id}_true",
-            f"enrollments_v6_{user_id}_false", 
-            f"enrollment_summary_v3_{user_id}",
-            f"enrollment_status_{user_id}_*",  # Will need wildcard deletion
+            f"enrollments_v8_{user_id}_list_true",
+            f"enrollments_v8_{user_id}_list_false", 
+            f"enrollment_summary_v8_{user_id}",
+            f"enrollment_status_v8_{user_id}",  # Base pattern
         ]
         
-        for pattern in cache_patterns:
-            if '*' in pattern:
-                # For wildcard patterns, we'd need to implement a more complex cache clearing
-                # For now, clear common course IDs (1-1000)
-                base_pattern = pattern.replace('*', '')
-                for course_id in range(1, 1001):
-                    cache_key = f"{base_pattern}{course_id}"
-                    cache.delete(hashlib.md5(cache_key.encode()).hexdigest())
-            else:
-                cache_key = hashlib.md5(pattern.encode()).hexdigest()
-                cache.delete(cache_key)
+        # Clear enrollment detail caches (reasonable range)
+        for enrollment_id in range(1, 1000):
+            cache_patterns.append(f"enrollment_detail_v8_{enrollment_id}")
+        
+        # Clear course-related caches that might be affected
+        try:
+            # Get course IDs for this user's enrollments
+            course_ids = Enrollment.objects.filter(
+                user_id=user_id
+            ).values_list('course_id', flat=True)[:50]  # Limit
+            
+            for course_id in course_ids:
+                cache_patterns.extend([
+                    f"course_detail_v8_{course_id}_{user_id}",
+                    f"course_duration_v8_{course_id}",
+                ])
+        except Exception:
+            pass  # Don't break if this fails
+        
+        # Hash keys and clear in batches
+        batch_size = 100
+        for i in range(0, len(cache_patterns), batch_size):
+            batch = cache_patterns[i:i + batch_size]
+            hashed_keys = [hashlib.md5(pattern.encode()).hexdigest() for pattern in batch]
+            cache.delete_many(hashed_keys)
     
     @staticmethod
     def clear_user_enrollment_caches(user_id):
@@ -453,6 +621,17 @@ class Wishlist(models.Model):
     
     def __str__(self):
         return f"{self.user.email} - {self.course.title}"
+    
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        # Clear wishlist cache for this user - v8
+        cache.delete(f"wishlist_v8_{self.user_id}")
+    
+    def delete(self, *args, **kwargs):
+        user_id = self.user_id
+        result = super().delete(*args, **kwargs)
+        cache.delete(f"wishlist_v8_{user_id}")
+        return result
 
 class PaymentCard(models.Model):
     CARD_TYPES = (
@@ -536,6 +715,32 @@ class Notification(models.Model):
             models.Index(fields=['user', 'is_seen']),
             models.Index(fields=['created_at']),
         ]
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        # Clear notification caches for this user - v8
+        self._clear_notification_caches()
+    
+    def delete(self, *args, **kwargs):
+        user_id = self.user_id
+        result = super().delete(*args, **kwargs)
+        self._clear_notification_caches_for_user(user_id)
+        return result
+    
+    def _clear_notification_caches(self):
+        """Clear notification caches for this user - UPDATED TO v8"""
+        self._clear_notification_caches_for_user(self.user_id)
+    
+    @staticmethod
+    def _clear_notification_caches_for_user(user_id):
+        """Clear notification caches - UPDATED TO v8"""
+        cache_patterns = [
+            f"notifications_v8_{user_id}_all",
+            f"notifications_v8_{user_id}_true",
+            f"notifications_v8_{user_id}_false"
+        ]
+        
+        hashed_keys = [hashlib.md5(pattern.encode()).hexdigest() for pattern in cache_patterns]
+        cache.delete_many(hashed_keys)
         
 class FCMDevice(models.Model):
     user = models.ForeignKey(
