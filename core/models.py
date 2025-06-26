@@ -1,12 +1,17 @@
 import hashlib
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
+from django.dispatch import receiver
+from django.db.models.signals import post_save
 from django.utils import timezone
 import random
 import string
 from datetime import timedelta
 from django.core.cache import cache
 from django.conf import settings
+import logging
+
+logger = logging.getLogger(__name__)
 
 class CustomUserManager(BaseUserManager):
     def create_user(self, email, password=None, **extra_fields):
@@ -138,11 +143,90 @@ class CourseCurriculum(models.Model):
     course = models.ForeignKey('Course', related_name='curriculum', on_delete=models.CASCADE)
     order = models.PositiveIntegerField(default=0)
     
+    # New fields for presigned URL management
+    presigned_url = models.URLField(blank=True, help_text='Pre-generated presigned URL')
+    presigned_expires_at = models.DateTimeField(null=True, blank=True, help_text='When presigned URL expires')
+    url_generation_status = models.CharField(
+        max_length=20,
+        choices=[
+            ('pending', 'Pending'),
+            ('ready', 'Ready'),
+            ('failed', 'Failed'),
+            ('expired', 'Expired'),
+            ('not_needed', 'Not Needed')  # For non-S3 URLs
+        ],
+        default='pending',
+        help_text='Status of presigned URL generation'
+    )
+    
     def __str__(self):
         return f"{self.course.title} - {self.title}"
     
+    def save(self, *args, **kwargs):
+        # Set status based on video_url
+        if self.video_url:
+            from core.s3_utils import is_s3_url
+            if is_s3_url(self.video_url):
+                if self.url_generation_status == 'pending':
+                    # Keep pending status for new S3 URLs
+                    pass
+            else:
+                # Non-S3 URLs don't need presigned generation
+                self.url_generation_status = 'not_needed'
+        else:
+            self.url_generation_status = 'not_needed'
+        
+        super().save(*args, **kwargs)
+        
+        # Clear related caches
+        self._clear_related_caches()
+    
+    def _clear_related_caches(self):
+        """Clear caches related to this curriculum item"""
+        try:
+            # Clear course detail cache
+            cache.delete(f"course_detail_v2_{self.course_id}")
+            
+            # Clear enrollment caches for users enrolled in this course
+            enrollment_cache_keys = [
+                f"enrollment_list_v3_{enrollment.user_id}"
+                for enrollment in self.course.enrollments.select_related('user')[:100]  # Limit to avoid memory issues
+            ]
+            cache.delete_many(enrollment_cache_keys)
+            
+        except Exception as e:
+            logger.warning(f"Cache clearing failed: {e}")
+    
+    @property
+    def is_url_ready(self):
+        """Check if presigned URL is ready and not expired"""
+        return (
+            self.url_generation_status == 'ready' and
+            self.presigned_url and
+            self.presigned_expires_at and
+            self.presigned_expires_at > timezone.now()
+        )
+    
     class Meta:
         ordering = ['order']
+        indexes = [
+            models.Index(fields=['course', 'order']),
+            models.Index(fields=['url_generation_status', 'presigned_expires_at']),
+            models.Index(fields=['course', 'url_generation_status']),
+        ]
+        
+@receiver(post_save, sender=CourseCurriculum)
+def handle_curriculum_save(sender, instance, created, **kwargs):
+    """Trigger presigned URL generation for new S3 videos"""
+    if instance.video_url and instance.url_generation_status == 'pending':
+        from core.s3_utils import is_s3_url
+        if is_s3_url(instance.video_url):
+            # Queue for background processing
+            from core.tasks import generate_presigned_url_async
+            generate_presigned_url_async.apply_async(
+                args=[instance.id],
+                countdown=5  # Start after 5 seconds to avoid overwhelming
+            )
 
 class Course(models.Model):
     title = models.CharField(max_length=200)

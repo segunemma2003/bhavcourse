@@ -508,3 +508,6 @@ def deactivate_expired_enrollments():
     expired_count = expired_enrollments.update(is_active=False)
     
     return f"Deactivated {expired_count} expired enrollments"
+
+
+
