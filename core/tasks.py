@@ -3,7 +3,9 @@ from django.utils import timezone
 from django.core.mail import send_mail
 from django.conf import settings
 from django.core.cache import cache
-from .models import CoursePlanType, Enrollment, UserSubscription, Notification, FCMDevice, CourseCurriculum
+
+from core.views_optimized import CacheWarmingService
+from .models import Course, CoursePlanType, Enrollment, UserSubscription, Notification, FCMDevice, CourseCurriculum
 from django.contrib.auth import get_user_model
 from .firebase import send_firebase_message, send_bulk_notifications
 from .s3_utils import generate_presigned_url, is_s3_url
@@ -797,26 +799,26 @@ def cleanup_failed_url_generations():
 # Add to your existing tasks
 @shared_task
 def warm_cache_for_popular_content():
-    return None
-#     """
-#     Pre-warm cache for popular courses and recent enrollments
-#     """
-#     from django.db.models import Count
+    
+    """
+    Pre-warm cache for popular courses and recent enrollments
+    """
+    from django.db.models import Count
 
     
-#     # Warm popular courses
-#     # CacheWarmingService.warm_popular_courses()
+    # Warm popular courses
+    CacheWarmingService.warm_popular_courses()
     
-#     # Warm recent user enrollments
-#     from core.models import Enrollment
-#     recent_users = Enrollment.objects.filter(
-#         date_enrolled__gte=timezone.now() - timedelta(days=7)
-#     ).values_list('user_id', flat=True).distinct()[:100]
+    # Warm recent user enrollments
+    from core.models import Enrollment
+    recent_users = Enrollment.objects.filter(
+        date_enrolled__gte=timezone.now() - timedelta(days=7)
+    ).values_list('user_id', flat=True).distinct()[:100]
     
-#     for user_id in recent_users:
-#         CacheWarmingService.warm_user_enrollments(user_id)
+    for user_id in recent_users:
+        CacheWarmingService.warm_user_enrollments(user_id)
     
-#     return f"Cache warmed for popular content and {len(recent_users)} recent users"
+    return f"Cache warmed for popular content and {len(recent_users)} recent users"
 
 
 @shared_task
