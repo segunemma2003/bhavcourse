@@ -198,12 +198,12 @@ class CourseRequirement(models.Model):
 
 class CourseCurriculum(models.Model):
     title = models.CharField(max_length=500)
-    video_url = models.URLField(max_length=1000, blank=True, null=True)
+    video_url = models.TextField(blank=True, null=True)
     course = models.ForeignKey('Course', related_name='curriculum', on_delete=models.CASCADE)
     order = models.PositiveIntegerField(default=0)
     
     # New fields for presigned URL management
-    presigned_url = models.URLField(max_length=1000,blank=True, help_text='Pre-generated presigned URL')
+    presigned_url = models.TextField(blank=True, help_text='Pre-generated presigned URL')
     presigned_expires_at = models.DateTimeField(null=True, blank=True, help_text='When presigned URL expires')
     url_generation_status = models.CharField(
         max_length=20,
