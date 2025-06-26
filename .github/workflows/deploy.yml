@@ -36,34 +36,46 @@ jobs:
           echo "SSH directory created successfully"
 
       - name: Setup SSH key (if secrets exist)
-        if: ${{ secrets.SSH_KEY != '' }}
+        if: ${{ env.SSH_KEY != '' }}
         run: |
           echo "Setting up SSH key..."
-          echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_rsa
+          echo "$SSH_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -t rsa ${{ secrets.HOST }} >> ~/.ssh/known_hosts
+          ssh-keyscan -t rsa $HOST >> ~/.ssh/known_hosts
           echo "SSH key setup complete"
+        env:
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          HOST: ${{ secrets.HOST }}
 
       - name: Test SSH connection
-        if: ${{ secrets.SSH_KEY != '' }}
+        if: ${{ env.SSH_KEY != '' }}
         run: |
           echo "Testing SSH connection..."
-          ssh -i ~/.ssh/id_rsa -o ConnectTimeout=10 ${{ secrets.USERNAME }}@${{ secrets.HOST }} -p ${{ secrets.PORT }} "echo 'SSH connection successful'"
+          ssh -i ~/.ssh/id_rsa -o ConnectTimeout=10 $USERNAME@$HOST -p $PORT "echo 'SSH connection successful'"
+        env:
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          HOST: ${{ secrets.HOST }}
+          PORT: ${{ secrets.PORT }}
+          USERNAME: ${{ secrets.USERNAME }}
 
       - name: Deploy (if SSH works)
-        if: ${{ secrets.SSH_KEY != '' }}
+        if: ${{ env.SSH_KEY != '' }}
         run: |
           echo "Starting deployment..."
           # Create a tarball of the project
           tar -czf project.tar.gz ./*
 
           # Copy the tarball to the server
-          scp -i ~/.ssh/id_rsa -P ${{ secrets.PORT }} project.tar.gz ${{ secrets.USERNAME }}@${{ secrets.HOST }}:/var/www/bhavani/project.tar.gz
+          scp -i ~/.ssh/id_rsa -P $PORT project.tar.gz $USERNAME@$HOST:/var/www/bhavani/project.tar.gz
 
           # Extract and run deployment
-          ssh -i ~/.ssh/id_rsa ${{ secrets.USERNAME }}@${{ secrets.HOST }} -p ${{ secrets.PORT }} << 'EOF'
+          ssh -i ~/.ssh/id_rsa $USERNAME@$HOST -p $PORT << 'EOF'
             cd /var/www/bhavani
             tar -xzf project.tar.gz && rm project.tar.gz
             chmod +x deploy.sh
             ./deploy.sh
           EOF
+        env:
+          HOST: ${{ secrets.HOST }}
+          PORT: ${{ secrets.PORT }}
+          USERNAME: ${{ secrets.USERNAME }}
