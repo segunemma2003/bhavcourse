@@ -1753,13 +1753,15 @@ class WishlistViewSet(viewsets.ModelViewSet):
        if getattr(self, 'swagger_fake_view', False):
            return self.queryset
        
+       # FIXED: Include category fields in only() to match select_related
        return Wishlist.objects.filter(
            user=self.request.user
        ).select_related(
            'course', 'course__category'
        ).only(
            'id', 'date_added',
-           'course__id', 'course__title', 'course__image', 'course__small_desc'
+           'course__id', 'course__title', 'course__image', 'course__small_desc',
+           'course__category__id', 'course__category__name'  # Added category fields
        ).order_by('-date_added')[:50]
     
     @swagger_auto_schema(
@@ -1824,7 +1826,6 @@ class WishlistViewSet(viewsets.ModelViewSet):
        result = super().destroy(request, *args, **kwargs)
        cache.delete(f"wishlist_v8_{request.user.id}")
        return result
-
 
 class PaymentCardViewSet(viewsets.ModelViewSet):
     """
