@@ -118,12 +118,12 @@ echo "=== Checking for migration conflicts ==="
 migration_output=$(python manage.py showmigrations --plan 2>&1)
 if echo "$migration_output" | grep -q "conflicting migrations" || echo "$migration_output" | grep -q "multiple leaf nodes"; then
     echo "Conflicting migrations detected, merging..."
-    python manage.py makemigrations --merge --noinput
+    # python manage.py makemigrations --merge --noinput
 fi
 
 # Run migrations
 echo "=== Running migrations ==="
-python manage.py migrate
+# python manage.py migrate
 
 # Collect static files
 echo "=== Collecting static files ==="
