@@ -19,7 +19,7 @@ from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.decorators import action
 from django.db import transaction
 from .models import Course, CourseObjective, CourseRequirement, CourseCurriculum, Category
-from .serializers import CourseCreateUpdateSerializer, CourseDetailSerializer, CourseListSerializer
+from .serializers import AdminChangePasswordSerializer, CourseCreateUpdateSerializer, CourseDetailSerializer, CourseListSerializer, UserChangePasswordSerializer
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from core.func import performance_monitor
@@ -3116,3 +3116,238 @@ def debug_enrollments(request):
             "error_type": type(e).__name__,
             "user_id": request.user.id
         })
+
+class AdminChangePasswordView(generics.GenericAPIView):
+    """
+    API endpoint for admin to change any user's password.
+    Requires admin permissions.
+    """
+    serializer_class = AdminChangePasswordSerializer
+    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+    
+    @swagger_auto_schema(
+        operation_summary="Change user password (Admin only)",
+        operation_description="""
+        Allows administrators to change any user's password.
+        
+        Features:
+        - Admin-only access with proper permission checks
+        - Password validation using Django's built-in validators
+        - Optional reason for audit trail
+        - Email notification to user (optional)
+        - Comprehensive logging for security audit
+        
+        Security measures:
+        - Requires admin authentication
+        - Logs all password change attempts
+        - Validates new password strength
+        - Sends notification to affected user
+        """,
+        request_body=AdminChangePasswordSerializer,
+        responses={
+            status.HTTP_200_OK: openapi.Response(
+                description="Password changed successfully",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'success': openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                        'message': openapi.Schema(type=openapi.TYPE_STRING),
+                        'user_id': openapi.Schema(type=openapi.TYPE_INTEGER),
+                        'changed_by': openapi.Schema(type=openapi.TYPE_STRING),
+                        'timestamp': openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_DATETIME)
+                    }
+                )
+            ),
+            status.HTTP_400_BAD_REQUEST: "Invalid request data or password validation failed",
+            status.HTTP_403_FORBIDDEN: "Admin access required",
+            status.HTTP_404_NOT_FOUND: "User not found"
+        }
+    )
+    def post(self, request, *args, **kwargs):
+        """Change user password with admin privileges"""
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        user_id = serializer.validated_data['user_id']
+        new_password = serializer.validated_data['new_password']
+        reason = serializer.validated_data.get('reason', '')
+        send_notification = serializer.validated_data.get('send_notification', True)
+        
+        try:
+            # Get the user whose password will be changed
+            target_user = User.objects.get(pk=user_id)
+            
+            # Prevent admin from changing their own password through this endpoint
+            if target_user.id == request.user.id:
+                return Response(
+                    {
+                        'error': 'Cannot change your own password through this endpoint. Use the regular change password functionality.'
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Log the password change attempt
+            logger.info(
+                f"Admin password change attempt: Admin {request.user.id} ({request.user.email}) "
+                f"attempting to change password for User {target_user.id} ({target_user.email}). "
+                f"Reason: {reason or 'No reason provided'}"
+            )
+            
+            # Change the password
+            target_user.set_password(new_password)
+            target_user.save()
+            
+            # Log successful password change
+            logger.info(
+                f"Admin password change successful: User {target_user.id} password changed by "
+                f"Admin {request.user.id}. Reason: {reason or 'No reason provided'}"
+            )
+            
+            # Send notification email if requested
+            if send_notification:
+                try:
+                    self.send_password_change_notification(target_user, request.user, reason)
+                except Exception as e:
+                    logger.error(f"Failed to send password change notification: {str(e)}")
+                    # Don't fail the whole operation if email fails
+            
+            # Prepare response
+            from django.utils import timezone
+            response_data = {
+                'success': True,
+                'message': f'Password successfully changed for user {target_user.full_name} ({target_user.email})',
+                'user_id': target_user.id,
+                'changed_by': request.user.email,
+                'timestamp': timezone.now().isoformat(),
+                'notification_sent': send_notification
+            }
+            
+            return Response(response_data, status=status.HTTP_200_OK)
+            
+        except User.DoesNotExist:
+            logger.warning(
+                f"Admin password change failed: User {user_id} not found. "
+                f"Request by Admin {request.user.id}"
+            )
+            return Response(
+                {'error': 'User not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+            
+        except Exception as e:
+            logger.error(
+                f"Admin password change error: {str(e)}. "
+                f"Admin {request.user.id} attempting to change password for User {user_id}"
+            )
+            return Response(
+                {'error': f'Failed to change password: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    def send_password_change_notification(self, target_user, admin_user, reason):
+        """Send email notification to user about password change"""
+        from django.core.mail import send_mail
+        from django.conf import settings
+        from django.utils import timezone
+        
+        subject = "Your password has been changed by an administrator"
+        
+        message = f"""
+Dear {target_user.full_name},
+
+Your account password has been changed by an administrator.
+
+Details:
+- Changed by: {admin_user.full_name} ({admin_user.email})
+- Date and time: {timezone.now().strftime('%Y-%m-%d %H:%M:%S %Z')}
+- Reason: {reason or 'No reason provided'}
+
+If you did not request this change or have concerns about your account security, 
+please contact our support team immediately.
+
+For security reasons, you will need to log in again with your new password.
+
+Best regards,
+The Administration Team
+        """
+        
+        try:
+            send_mail(
+                subject=subject,
+                message=message,
+                from_email=settings.EMAIL_HOST_USER,
+                recipient_list=[target_user.email],
+                fail_silently=False
+            )
+            logger.info(f"Password change notification sent to {target_user.email}")
+        except Exception as e:
+            logger.error(f"Failed to send password change notification to {target_user.email}: {str(e)}")
+            raise
+        
+class UserChangePasswordView(generics.GenericAPIView):
+    """
+    API endpoint for authenticated users to change their own password.
+    """
+    serializer_class = UserChangePasswordSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    @swagger_auto_schema(
+        operation_summary="Change own password",
+        operation_description="""
+        Allows authenticated users to change their own password.
+        
+        Features:
+        - Requires current password verification
+        - Password strength validation
+        - Secure password update
+        - Activity logging
+        """,
+        request_body=UserChangePasswordSerializer,
+        responses={
+            status.HTTP_200_OK: openapi.Response(
+                description="Password changed successfully",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        'success': openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                        'message': openapi.Schema(type=openapi.TYPE_STRING)
+                    }
+                )
+            ),
+            status.HTTP_400_BAD_REQUEST: "Invalid current password or validation failed"
+        }
+    )
+    def post(self, request, *args, **kwargs):
+        """Change user's own password"""
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        current_password = serializer.validated_data['current_password']
+        new_password = serializer.validated_data['new_password']
+        
+        # Verify current password
+        if not request.user.check_password(current_password):
+            return Response(
+                {'error': 'Current password is incorrect'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # Change password
+            request.user.set_password(new_password)
+            request.user.save()
+            
+            # Log the password change
+            logger.info(f"User {request.user.id} ({request.user.email}) changed their password")
+            
+            return Response({
+                'success': True,
+                'message': 'Password changed successfully'
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"Password change error for user {request.user.id}: {str(e)}")
+            return Response(
+                {'error': f'Failed to change password: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )

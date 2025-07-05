@@ -1,3 +1,4 @@
+from django.forms import ValidationError
 from django.utils import timezone
 import hashlib
 import os
@@ -19,6 +20,7 @@ from django.contrib.auth import authenticate
 from dj_rest_auth.serializers import LoginSerializer as BaseLoginSerializer
 import json
 import logging
+from django.contrib.auth.password_validation import validate_password
 
 logger = logging.getLogger(__name__)
 
@@ -1579,3 +1581,90 @@ class EnrollmentListSerializer(serializers.ModelSerializer):
             'last_accessed': None,  # Track when user last accessed the course
             'estimated_completion_time': self.get_total_duration(obj)  # In minutes
         }
+        
+class AdminChangePasswordSerializer(serializers.Serializer):
+    """Serializer for admin changing user passwords"""
+    user_id = serializers.IntegerField(help_text="ID of the user whose password to change")
+    new_password = serializers.CharField(
+        min_length=8,
+        help_text="New password (minimum 8 characters)",
+        style={'input_type': 'password'}
+    )
+    confirm_password = serializers.CharField(
+        min_length=8,
+        help_text="Confirm new password",
+        style={'input_type': 'password'}
+    )
+    reason = serializers.CharField(
+        max_length=500,
+        required=False,
+        allow_blank=True,
+        help_text="Reason for password change (optional)"
+    )
+    send_notification = serializers.BooleanField(
+        default=True,
+        help_text="Send email notification to user about password change"
+    )
+    
+    class Meta:
+        ref_name = "AdminChangePasswordSerializer"
+    
+    def validate_user_id(self, value):
+        """Validate that the user exists"""
+        try:
+            user = User.objects.get(pk=value)
+            return value
+        except User.DoesNotExist:
+            raise serializers.ValidationError("User with this ID does not exist.")
+    
+    def validate_new_password(self, value):
+        """Validate password using Django's password validators"""
+        try:
+            validate_password(value)
+        except ValidationError as e:
+            raise serializers.ValidationError(list(e.messages))
+        return value
+    
+    def validate(self, data):
+        """Validate that passwords match"""
+        if data['new_password'] != data['confirm_password']:
+            raise serializers.ValidationError({
+                'confirm_password': "Passwords do not match."
+            })
+        return data
+    
+class UserChangePasswordSerializer(serializers.Serializer):
+    """Serializer for users changing their own passwords"""
+    current_password = serializers.CharField(
+        help_text="Current password",
+        style={'input_type': 'password'}
+    )
+    new_password = serializers.CharField(
+        min_length=8,
+        help_text="New password (minimum 8 characters)",
+        style={'input_type': 'password'}
+    )
+    confirm_password = serializers.CharField(
+        min_length=8,
+        help_text="Confirm new password",
+        style={'input_type': 'password'}
+    )
+    
+    class Meta:
+        ref_name = "UserChangePasswordSerializer"
+    
+    def validate_new_password(self, value):
+        """Validate password using Django's password validators"""
+        try:
+            validate_password(value)
+        except ValidationError as e:
+            raise serializers.ValidationError(list(e.messages))
+        return value
+    
+    def validate(self, data):
+        """Validate that new passwords match"""
+        if data['new_password'] != data['confirm_password']:
+            raise serializers.ValidationError({
+                'confirm_password': "New passwords do not match."
+            })
+        return data    

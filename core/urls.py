@@ -14,8 +14,8 @@ from core.firebase_auth_view import FirebaseGoogleAuthView
 from core.payment_views import CreateOrderView, VerifyPaymentView, cancel_subscription, razorpay_webhook, renew_subscription
 from core.views_presign import GeneratePresignedURLView, S3DebugView
 from .views import (
-    CategoryViewSet, CourseCurriculumViewSet, CourseObjectiveViewSet, CourseRequirementViewSet, CourseViewSet, 
-    EnrollmentViewSet, NotificationViewSet, ProfilePictureDeleteView, ProfilePictureRetrieveView, ProfilePictureUploadView, PublicCourseDetailView, SimpleEnrollmentViewSet, SubscriptionPlanViewSet, UserProfileView, UserSubscriptionViewSet, 
+    AdminChangePasswordView, CategoryViewSet, CourseCurriculumViewSet, CourseObjectiveViewSet, CourseRequirementViewSet, CourseViewSet, 
+    EnrollmentViewSet, NotificationViewSet, ProfilePictureDeleteView, ProfilePictureRetrieveView, ProfilePictureUploadView, PublicCourseDetailView, SimpleEnrollmentViewSet, SubscriptionPlanViewSet, UserChangePasswordView, UserProfileView, UserSubscriptionViewSet, 
     WishlistViewSet, PaymentCardViewSet, PurchaseViewSet, UpdateProfileView, LogoutView, DeleteAccountView, 
     FCMDeviceViewSet, debug_enrollments, debug_login, CoursePurchaseView
 )
@@ -47,7 +47,10 @@ urlpatterns = [
     path('auth/google/', GoogleLoginView.as_view(), name='google-login'),
     path('auth/logout/', LogoutView.as_view(), name='logout'),
     path('auth/debug-login/', debug_login, name='debug-login'),
+    path('admin/change-password/', AdminChangePasswordView.as_view(), name='admin-change-password'),
     
+    # User password management endpoints  
+    path('auth/change-password/', UserChangePasswordView.as_view(), name='user-change-password'),
     # User profile
     path('profile/update/', UpdateProfileView.as_view(), name='update-profile'),
     path('account/delete/', DeleteAccountView.as_view(), name='delete-account'),
