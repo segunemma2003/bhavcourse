@@ -161,6 +161,7 @@ class User(AbstractBaseUser, PermissionsMixin):
             f"notifications_v8_{user_id}_true",
             f"notifications_v8_{user_id}_false",
             f"admin_student_enrollments_v8_{user_id}",
+             "admin_all_students_v8",
         ]
         
         hashed_keys = [hashlib.md5(pattern.encode()).hexdigest() for pattern in cache_patterns]

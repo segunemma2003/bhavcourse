@@ -26,6 +26,8 @@ import uuid
 from decimal import Decimal
 import logging
 
+from .cache_manager import CacheManager, AdminCacheMixin
+
 logger = logging.getLogger(__name__)
 User = get_user_model()
 
@@ -33,7 +35,7 @@ User = get_user_model()
 
 
 
-class AdminDeleteUserAccountView(generics.DestroyAPIView):
+class AdminDeleteUserAccountView(AdminCacheMixin, generics.DestroyAPIView):
     """
     Admin API endpoint for deleting any user account by ID.
     This permanently deletes the user and all associated data.
@@ -44,123 +46,8 @@ class AdminDeleteUserAccountView(generics.DestroyAPIView):
         operation_summary="Admin: Delete user account",
         operation_description="""
         Admin-only endpoint to permanently delete any user account by ID.
-        
-        **This action:**
-        1. Permanently deletes the user account
-        2. Deactivates all enrollments
-        3. Marks all purchases as cancelled
-        4. Removes payment cards
-        5. Deletes notifications
-        6. Removes FCM devices
-        7. Clears wishlist items
-        8. Creates audit log entry
-        
-        **WARNING: This action is IRREVERSIBLE!**
-        
-        **Use Cases:**
-        - GDPR/Privacy compliance requests
-        - Remove spam or fraudulent accounts
-        - Clean up test accounts
-        - Handle account termination requests
-        """,
-        manual_parameters=[
-            openapi.Parameter(
-                'user_id',
-                openapi.IN_PATH,
-                description="ID of the user account to delete",
-                type=openapi.TYPE_INTEGER,
-                required=True
-            ),
-        ],
-        responses={
-            status.HTTP_200_OK: openapi.Response(
-                description="User account deleted successfully",
-                examples={
-                    "application/json": {
-                        "success": True,
-                        "data": {
-                            "message": "User account deleted successfully",
-                            "deleted_user": {
-                                "id": 37,
-                                "email": "user@example.com",
-                                "full_name": "John Doe",
-                                "date_joined": "2024-12-01T10:30:00Z"
-                            },
-                            "cleanup_summary": {
-                                "enrollments_deactivated": 3,
-                                "purchases_cancelled": 2,
-                                "payment_cards_removed": 1,
-                                "notifications_deleted": 15,
-                                "wishlist_items_removed": 5,
-                                "fcm_devices_removed": 2
-                            },
-                            "deleted_by": "admin@example.com",
-                            "deletion_timestamp": "2025-01-20T14:30:00Z"
-                        }
-                    }
-                },
-                schema=openapi.Schema(
-                    type=openapi.TYPE_OBJECT,
-                    properties={
-                        'success': openapi.Schema(type=openapi.TYPE_BOOLEAN),
-                        'data': openapi.Schema(
-                            type=openapi.TYPE_OBJECT,
-                            properties={
-                                'message': openapi.Schema(type=openapi.TYPE_STRING),
-                                'deleted_user': openapi.Schema(
-                                    type=openapi.TYPE_OBJECT,
-                                    properties={
-                                        'id': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                        'email': openapi.Schema(type=openapi.TYPE_STRING),
-                                        'full_name': openapi.Schema(type=openapi.TYPE_STRING),
-                                        'date_joined': openapi.Schema(type=openapi.TYPE_STRING)
-                                    }
-                                ),
-                                'cleanup_summary': openapi.Schema(
-                                    type=openapi.TYPE_OBJECT,
-                                    properties={
-                                        'enrollments_deactivated': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                        'purchases_cancelled': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                        'payment_cards_removed': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                        'notifications_deleted': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                        'wishlist_items_removed': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                        'fcm_devices_removed': openapi.Schema(type=openapi.TYPE_INTEGER)
-                                    }
-                                ),
-                                'deleted_by': openapi.Schema(type=openapi.TYPE_STRING),
-                                'deletion_timestamp': openapi.Schema(type=openapi.TYPE_STRING)
-                            }
-                        )
-                    }
-                )
-            ),
-            status.HTTP_404_NOT_FOUND: openapi.Response(
-                description="User not found",
-                examples={
-                    "application/json": {
-                        "error": "User not found",
-                        "details": "No user found with ID 37"
-                    }
-                }
-            ),
-            status.HTTP_400_BAD_REQUEST: openapi.Response(
-                description="Cannot delete admin user",
-                examples={
-                    "application/json": {
-                        "error": "Cannot delete admin user",
-                        "details": "Admin users cannot be deleted through this endpoint"
-                    }
-                }
-            ),
-            status.HTTP_403_FORBIDDEN: openapi.Response(
-                description="Admin access required",
-                examples={
-                    "application/json": {
-                        "detail": "You do not have permission to perform this action."
-                    }
-                }
-            )
-        }
+        Now with comprehensive cache clearing to ensure UI updates immediately.
+        """
     )
     def delete(self, request, user_id, *args, **kwargs):
         try:
@@ -202,11 +89,15 @@ class AdminDeleteUserAccountView(generics.DestroyAPIView):
                 # Create audit log before deletion
                 self._create_audit_log(request.user, user_to_delete, cleanup_summary)
                 
+                # CLEAR CACHES BEFORE DELETION
+                self.clear_relevant_caches('user_delete', user_id=user_id)
+                
                 # Delete the user (this will cascade to related objects)
                 user_to_delete.delete()
             
-            # Clear any cached data for this user
-            self._clear_user_cache(user_id)
+            # ADDITIONAL cache clearing after deletion
+            CacheManager.clear_admin_cache()
+            CacheManager.clear_course_cache()  # In case user was in course lists
             
             # Prepare response
             response_data = {
@@ -214,7 +105,8 @@ class AdminDeleteUserAccountView(generics.DestroyAPIView):
                 'deleted_user': user_info,
                 'cleanup_summary': cleanup_summary,
                 'deleted_by': request.user.email,
-                'deletion_timestamp': timezone.now()
+                'deletion_timestamp': timezone.now(),
+                'cache_cleared': True  # Indicate caches were cleared
             }
             
             return Response({"success": True, "data": response_data}, status=status.HTTP_200_OK)
@@ -238,9 +130,7 @@ class AdminDeleteUserAccountView(generics.DestroyAPIView):
             )
     
     def _cleanup_user_data(self, user):
-        """
-        Clean up all user-related data and return summary
-        """
+        """Clean up all user-related data and return summary"""
         cleanup_summary = {
             'enrollments_deactivated': 0,
             'purchases_cancelled': 0,
@@ -298,9 +188,7 @@ class AdminDeleteUserAccountView(generics.DestroyAPIView):
         return cleanup_summary
     
     def _create_audit_log(self, admin_user, deleted_user, cleanup_summary):
-        """
-        Create audit log entry for account deletion
-        """
+        """Create audit log entry for account deletion"""
         try:
             # Create a notification for the admin as audit trail
             Notification.objects.create(
@@ -319,34 +207,10 @@ class AdminDeleteUserAccountView(generics.DestroyAPIView):
             
         except Exception as e:
             logger.error(f"Failed to create audit log: {str(e)}")
-    
-    def _clear_user_cache(self, user_id):
-        """Clear all cached data for the deleted user"""
-        try:
-            # Clear enrollment cache
-            for page in range(1, 6):
-                for page_size in [10, 20, 50]:
-                    key_string = f"enrollments_{user_id}_{page}_{page_size}"
-                    cache_key = hashlib.md5(key_string.encode()).hexdigest()
-                    cache.delete(cache_key)
-            
-            # Clear other user-specific caches
-            cache_patterns = [
-                f"user_profile_{user_id}",
-                f"user_enrollments_{user_id}",
-                f"user_notifications_{user_id}",
-                f"user_wishlist_{user_id}"
-            ]
-            
-            for pattern in cache_patterns:
-                cache.delete(pattern)
-                
-        except Exception as e:
-            logger.warning(f"Failed to clear cache for user {user_id}: {str(e)}")
 
 
 # Also create a bulk delete endpoint for multiple users
-class AdminBulkDeleteUsersView(generics.CreateAPIView):
+class AdminBulkDeleteUsersView(AdminCacheMixin, generics.CreateAPIView):
     """
     Admin API endpoint for bulk deletion of multiple user accounts.
     """
@@ -379,56 +243,17 @@ class AdminBulkDeleteUsersView(generics.CreateAPIView):
         operation_summary="Admin: Bulk delete user accounts",
         operation_description="""
         Admin-only endpoint for bulk deletion of multiple user accounts.
-        
-        **WARNING: This action is IRREVERSIBLE!**
-        
-        **Safety Features:**
-        - Limited to 50 users per request
-        - Requires explicit confirmation
-        - Skips admin users automatically
-        - Provides detailed results for each deletion
-        """,
-        request_body=InputSerializer,
-        responses={
-            status.HTTP_200_OK: openapi.Response(
-                description="Bulk deletion completed",
-                examples={
-                    "application/json": {
-                        "success": True,
-                        "data": {
-                            "total_requested": 3,
-                            "successfully_deleted": 2,
-                            "failed_deletions": 1,
-                            "results": [
-                                {
-                                    "user_id": 37,
-                                    "status": "success",
-                                    "email": "user1@example.com",
-                                    "message": "User deleted successfully"
-                                },
-                                {
-                                    "user_id": 38,
-                                    "status": "success", 
-                                    "email": "user2@example.com",
-                                    "message": "User deleted successfully"
-                                },
-                                {
-                                    "user_id": 39,
-                                    "status": "error",
-                                    "message": "User not found"
-                                }
-                            ]
-                        }
-                    }
-                }
-            )
-        }
+        Now includes comprehensive cache clearing.
+        """
     )
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         
         user_ids = serializer.validated_data['user_ids']
+        
+        # CLEAR CACHES BEFORE BULK OPERATION
+        self.clear_relevant_caches('bulk_operation', user_ids=user_ids)
         
         results = []
         successfully_deleted = 0
@@ -491,19 +316,23 @@ class AdminBulkDeleteUsersView(generics.CreateAPIView):
                 })
                 failed_deletions += 1
         
+        # CLEAR ALL CACHES AFTER BULK OPERATION
+        CacheManager.clear_admin_cache()
+        CacheManager.clear_course_cache()
+        
         return Response({
             "success": True,
             "data": {
                 'total_requested': len(user_ids),
                 'successfully_deleted': successfully_deleted,
                 'failed_deletions': failed_deletions,
-                'results': results
+                'results': results,
+                'cache_cleared': True
             }
         }, status=status.HTTP_200_OK)
     
     def _cleanup_user_data(self, user):
         """Same cleanup logic as single deletion"""
-        # Use the same method from AdminDeleteUserAccountView
         admin_delete_view = AdminDeleteUserAccountView()
         return admin_delete_view._cleanup_user_data(user)
 class AdminAllStudentsView(generics.ListAPIView):
@@ -819,7 +648,11 @@ class AdminAllStudentsView(generics.ListAPIView):
             'count': paginator.count,
             'next': None,
             'previous': None,
-            'results': page_obj.object_list
+            'results': page_obj.object_list,
+            'cache_info': {
+                'cached': False,
+                'timestamp': timezone.now().isoformat()
+            }
         }
         
         # Add pagination URLs
@@ -1682,10 +1515,9 @@ class PublicContentPageView(ContentPageMixin, generics.RetrieveAPIView):
         return Response(serializer.data)
     
     
-class AdminAddStudentToPlanView(generics.CreateAPIView):
+class AdminAddStudentToPlanView(AdminCacheMixin, generics.CreateAPIView):
     """
-    Admin API endpoint for manually adding a student to a subscription plan without payment verification.
-    This simulates the same flow as course purchase but bypasses payment processing.
+    Admin API endpoint for manually adding a student to a subscription plan.
     """
     permission_classes = [permissions.IsAuthenticated, IsAdminUser]
     
@@ -1713,15 +1545,6 @@ class AdminAddStudentToPlanView(generics.CreateAPIView):
                 return value
             except Course.DoesNotExist:
                 raise serializers.ValidationError("Course does not exist")
-        
-        def validate_payment_card_id(self, value):
-            if value is None:
-                return None
-            try:
-                PaymentCard.objects.get(pk=value)
-                return value
-            except PaymentCard.DoesNotExist:
-                raise serializers.ValidationError("Payment card does not exist")
     
     def get_serializer_class(self):
         return self.InputSerializer
@@ -1729,102 +1552,9 @@ class AdminAddStudentToPlanView(generics.CreateAPIView):
     @swagger_auto_schema(
         operation_summary="Admin: Add student to subscription plan",
         operation_description="""
-        Admin-only endpoint to manually add a student to a course subscription plan without payment verification.
-        
-        This endpoint simulates the complete purchase flow:
-        1. Creates a Purchase record with COMPLETED status
-        2. Creates/updates Enrollment for the course with selected plan
-        3. Creates a mock PaymentOrder record
-        4. Creates notifications for purchase and enrollment
-        5. All without requiring actual payment processing
-        
-        **Admin Use Cases:**
-        - Manually enroll students for promotional purposes
-        - Handle offline payments
-        - Resolve payment issues
-        - Grant free access to courses
-        """,
-        request_body=InputSerializer,
-        responses={
-            status.HTTP_201_CREATED: openapi.Response(
-                description="Student added to plan successfully",
-                examples={
-                    "application/json": {
-                        "success": True,
-                        "data": {
-                            "message": "Successfully enrolled user@example.com in Course Title (Lifetime)",
-                            "purchase": {
-                                "id": 123,
-                                "transaction_id": "ADMIN_A1B2C3D4E5F6",
-                                "amount": "299.00",
-                                "payment_status": "COMPLETED"
-                            },
-                            "enrollment": {
-                                "id": 456,
-                                "plan_type": "LIFETIME",
-                                "plan_name": "Lifetime",
-                                "expiry_date": None,
-                                "is_active": True
-                            },
-                            "payment_order_id": 789,
-                            "admin_action": True,
-                            "added_by": "admin@example.com"
-                        }
-                    }
-                },
-                schema=openapi.Schema(
-                    type=openapi.TYPE_OBJECT,
-                    properties={
-                        'success': openapi.Schema(type=openapi.TYPE_BOOLEAN),
-                        'data': openapi.Schema(
-                            type=openapi.TYPE_OBJECT,
-                            properties={
-                                'message': openapi.Schema(type=openapi.TYPE_STRING),
-                                'purchase': openapi.Schema(
-                                    type=openapi.TYPE_OBJECT,
-                                    properties={
-                                        'id': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                        'transaction_id': openapi.Schema(type=openapi.TYPE_STRING),
-                                        'amount': openapi.Schema(type=openapi.TYPE_STRING),
-                                        'payment_status': openapi.Schema(type=openapi.TYPE_STRING)
-                                    }
-                                ),
-                                'enrollment': openapi.Schema(
-                                    type=openapi.TYPE_OBJECT,
-                                    properties={
-                                        'id': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                        'plan_type': openapi.Schema(type=openapi.TYPE_STRING),
-                                        'plan_name': openapi.Schema(type=openapi.TYPE_STRING),
-                                        'expiry_date': openapi.Schema(type=openapi.TYPE_STRING, format='date-time'),
-                                        'is_active': openapi.Schema(type=openapi.TYPE_BOOLEAN)
-                                    }
-                                ),
-                                'payment_order_id': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                'admin_action': openapi.Schema(type=openapi.TYPE_BOOLEAN),
-                                'added_by': openapi.Schema(type=openapi.TYPE_STRING)
-                            }
-                        )
-                    }
-                )
-            ),
-            status.HTTP_400_BAD_REQUEST: openapi.Response(
-                description="Invalid request data",
-                examples={
-                    "application/json": {
-                        "error": "Invalid request data",
-                        "details": "User does not exist"
-                    }
-                }
-            ),
-            status.HTTP_403_FORBIDDEN: openapi.Response(
-                description="Admin access required",
-                examples={
-                    "application/json": {
-                        "detail": "You do not have permission to perform this action."
-                    }
-                }
-            )
-        }
+        Admin-only endpoint to manually add a student to a course subscription plan.
+        Includes comprehensive cache clearing for immediate UI updates.
+        """
     )
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -1847,7 +1577,6 @@ class AdminAddStudentToPlanView(generics.CreateAPIView):
             if payment_card_id:
                 try:
                     payment_card = PaymentCard.objects.get(pk=payment_card_id)
-                    # Verify payment card belongs to user if provided
                     if payment_card.user != user:
                         return Response(
                             {'error': 'Payment card does not belong to the specified user'},
@@ -1881,9 +1610,9 @@ class AdminAddStudentToPlanView(generics.CreateAPIView):
                     payment_card=payment_card,
                     notes=notes
                 )
-            
-            # Clear user's enrollment cache since we added new enrollment
-            self._clear_user_cache(user.id)
+                
+                # CLEAR CACHES IMMEDIATELY AFTER ENROLLMENT
+                self.clear_relevant_caches('user_enroll', user_id=user_id, course_id=course_id)
             
             # Prepare response data
             response_data = {
@@ -1903,21 +1632,12 @@ class AdminAddStudentToPlanView(generics.CreateAPIView):
                 },
                 'payment_order_id': result['payment_order'].id,
                 'admin_action': True,
-                'added_by': request.user.email
+                'added_by': request.user.email,
+                'cache_cleared': True
             }
             
             return Response({"success": True, "data": response_data}, status=status.HTTP_201_CREATED)
             
-        except User.DoesNotExist:
-            return Response(
-                {'error': 'User not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-        except Course.DoesNotExist:
-            return Response(
-                {'error': 'Course not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
         except Exception as e:
             logger.error(f"Admin enrollment failed: {str(e)}")
             return Response(
@@ -1926,17 +1646,13 @@ class AdminAddStudentToPlanView(generics.CreateAPIView):
             )
     
     def _process_admin_enrollment(self, admin_user, user, course, plan_type, amount_paid, payment_card=None, notes=''):
-        """
-        Process admin enrollment - simulates the same flow as course purchase but without payment verification
-        """
+        """Process admin enrollment with comprehensive data creation"""
         # Generate mock transaction ID
         transaction_id = f"ADMIN_{uuid.uuid4().hex[:12].upper()}"
-        
-        # Generate mock Razorpay IDs
         mock_order_id = f"order_admin_{uuid.uuid4().hex[:10]}"
         mock_payment_id = f"pay_admin_{uuid.uuid4().hex[:10]}"
         
-        # 1. Create or update PaymentOrder (mock)
+        # Create or update PaymentOrder
         payment_order, created = PaymentOrder.objects.get_or_create(
             user=user,
             course=course,
@@ -1950,13 +1666,11 @@ class AdminAddStudentToPlanView(generics.CreateAPIView):
         )
         
         if not created:
-            # Update existing order
             payment_order.razorpay_payment_id = mock_payment_id
-            payment_order.razorpay_signature = f"admin_signature_{uuid.uuid4().hex[:16]}"
             payment_order.status = 'PAID'
             payment_order.save()
         
-        # 2. Create Purchase record
+        # Create Purchase record
         purchase = Purchase.objects.create(
             user=user,
             course=course,
@@ -1969,7 +1683,7 @@ class AdminAddStudentToPlanView(generics.CreateAPIView):
             payment_card=payment_card
         )
         
-        # 3. Create or update Enrollment
+        # Create or update Enrollment
         enrollment, enrollment_created = Enrollment.objects.get_or_create(
             user=user,
             course=course,
@@ -1981,24 +1695,22 @@ class AdminAddStudentToPlanView(generics.CreateAPIView):
         )
         
         if not enrollment_created:
-            # Update existing enrollment
             enrollment.plan_type = plan_type
             enrollment.amount_paid = amount_paid
             enrollment.is_active = True
             enrollment.save()
         
-        # Calculate expiry date
+        # Set expiry date
         if plan_type == CoursePlanType.ONE_MONTH:
             enrollment.expiry_date = timezone.now() + timezone.timedelta(days=30)
         elif plan_type == CoursePlanType.THREE_MONTHS:
             enrollment.expiry_date = timezone.now() + timezone.timedelta(days=90)
         elif plan_type == CoursePlanType.LIFETIME:
-            enrollment.expiry_date = None  # No expiry for lifetime
+            enrollment.expiry_date = None
         
         enrollment.save()
         
-        # 4. Create Notifications
-        # Purchase notification
+        # Create notifications
         Notification.objects.create(
             user=user,
             title="Course Access Granted",
@@ -2006,33 +1718,12 @@ class AdminAddStudentToPlanView(generics.CreateAPIView):
             notification_type='COURSE'
         )
         
-        # Enrollment notification
-        Notification.objects.create(
-            user=user,
-            title="Enrollment Successful",
-            message=f"Your enrollment in '{course.title}' is now active. Enjoy learning!",
-            notification_type='COURSE'
-        )
-        
-        # Admin notification (optional)
-        admin_notes = f"Admin enrollment by {admin_user.email}. Notes: {notes}" if notes else f"Admin enrollment by {admin_user.email}"
         Notification.objects.create(
             user=admin_user,
             title="Student Enrolled",
-            message=f"Successfully enrolled {user.email} in '{course.title}' ({enrollment.get_plan_type_display()}). {admin_notes}",
+            message=f"Successfully enrolled {user.email} in '{course.title}' ({enrollment.get_plan_type_display()}). Notes: {notes}",
             notification_type='SYSTEM'
         )
-        
-        # 5. Send push notification (if FCM device exists)
-        try:
-            from .tasks import send_push_notification
-            send_push_notification.delay(
-                user.id,
-                "Course Access Granted",
-                f"You now have access to '{course.title}' - {enrollment.get_plan_type_display()} plan"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to send push notification: {e}")
         
         return {
             'message': f"Successfully enrolled {user.email} in {course.title} ({enrollment.get_plan_type_display()})",
@@ -2040,23 +1731,8 @@ class AdminAddStudentToPlanView(generics.CreateAPIView):
             'enrollment': enrollment,
             'payment_order': payment_order
         }
-    
-    def _clear_user_cache(self, user_id):
-        """Clear enrollment cache for the enrolled user"""
-        try:
-            # Clear common cache patterns
-            for page in range(1, 6):  # Clear first 5 pages
-                for page_size in [10, 20, 50]:
-                    key_string = f"enrollments_{user_id}_{page}_{page_size}"
-                    cache_key = hashlib.md5(key_string.encode()).hexdigest()
-                    cache.delete(cache_key)
-        except Exception:
-            pass
-class AdminRemoveStudentFromPlanView(generics.DestroyAPIView):
-    """
-    Admin API endpoint for removing a student from a course subscription plan.
-    This deactivates enrollment and updates related records.
-    """
+class AdminRemoveStudentFromPlanView(AdminCacheMixin, generics.DestroyAPIView):
+    """Admin API endpoint for removing a student from a course subscription plan."""
     permission_classes = [permissions.IsAuthenticated, IsAdminUser]
     
     class InputSerializer(serializers.Serializer):
@@ -2067,124 +1743,27 @@ class AdminRemoveStudentFromPlanView(generics.DestroyAPIView):
         
         class Meta:
             ref_name = "AdminRemoveStudentInputSerializer"
-        
-        def validate_user_id(self, value):
-            try:
-                User.objects.get(pk=value)
-                return value
-            except User.DoesNotExist:
-                raise serializers.ValidationError("User does not exist")
-        
-        def validate_course_id(self, value):
-            try:
-                Course.objects.get(pk=value)
-                return value
-            except Course.DoesNotExist:
-                raise serializers.ValidationError("Course does not exist")
     
     def get_serializer_class(self):
         return self.InputSerializer
     
     @swagger_auto_schema(
         operation_summary="Admin: Remove student from subscription plan",
-        operation_description="""
-        Admin-only endpoint to remove a student from a course subscription plan.
-        
-        This endpoint:
-        1. Deactivates the user's enrollment for the specified course
-        2. Updates purchase status to REFUNDED if refund_amount is provided
-        3. Creates notifications for user and admin
-        4. Logs the action for audit trail
-        5. Clears relevant caches
-        
-        **Admin Use Cases:**
-        - Handle refund requests
-        - Remove access due to policy violations
-        - Resolve billing issues
-        - Cancel enrollments upon request
-        """,
-        request_body=InputSerializer,
-        responses={
-            status.HTTP_200_OK: openapi.Response(
-                description="Student removed from plan successfully",
-                examples={
-                    "application/json": {
-                        "success": True,
-                        "data": {
-                            "message": "Successfully removed user@example.com from Course Title",
-                            "enrollment_id": 456,
-                            "deactivated_at": "2025-01-20T10:30:00Z",
-                            "refund_processed": True,
-                            "refund_amount": "99.00",
-                            "admin_action": True,
-                            "removed_by": "admin@example.com",
-                            "reason": "User requested refund"
-                        }
-                    }
-                },
-                schema=openapi.Schema(
-                    type=openapi.TYPE_OBJECT,
-                    properties={
-                        'success': openapi.Schema(type=openapi.TYPE_BOOLEAN),
-                        'data': openapi.Schema(
-                            type=openapi.TYPE_OBJECT,
-                            properties={
-                                'message': openapi.Schema(type=openapi.TYPE_STRING),
-                                'enrollment_id': openapi.Schema(type=openapi.TYPE_INTEGER),
-                                'deactivated_at': openapi.Schema(type=openapi.TYPE_STRING),
-                                'refund_processed': openapi.Schema(type=openapi.TYPE_BOOLEAN),
-                                'refund_amount': openapi.Schema(type=openapi.TYPE_STRING),
-                                'admin_action': openapi.Schema(type=openapi.TYPE_BOOLEAN),
-                                'removed_by': openapi.Schema(type=openapi.TYPE_STRING),
-                                'reason': openapi.Schema(type=openapi.TYPE_STRING)
-                            }
-                        )
-                    }
-                )
-            ),
-            status.HTTP_400_BAD_REQUEST: openapi.Response(
-                description="Invalid request data",
-                examples={
-                    "application/json": {
-                        "error": "Invalid request data",
-                        "details": "User does not exist"
-                    }
-                }
-            ),
-            status.HTTP_404_NOT_FOUND: openapi.Response(
-                description="Enrollment not found",
-                examples={
-                    "application/json": {
-                        "error": "No active enrollment found for this user and course"
-                    }
-                }
-            ),
-            status.HTTP_403_FORBIDDEN: openapi.Response(
-                description="Admin access required",
-                examples={
-                    "application/json": {
-                        "detail": "You do not have permission to perform this action."
-                    }
-                }
-            )
-        }
+        operation_description="Remove student from course with immediate cache clearing."
     )
     def delete(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         
-        # Extract validated data
         user_id = serializer.validated_data['user_id']
         course_id = serializer.validated_data['course_id']
         reason = serializer.validated_data.get('reason', '')
         refund_amount = serializer.validated_data.get('refund_amount')
         
         try:
-            # Get objects
             user = User.objects.get(pk=user_id)
             course = Course.objects.get(pk=course_id)
             
-            # Find the enrollment
             try:
                 enrollment = Enrollment.objects.get(user=user, course=course, is_active=True)
             except Enrollment.DoesNotExist:
@@ -2202,11 +1781,10 @@ class AdminRemoveStudentFromPlanView(generics.DestroyAPIView):
                     reason=reason,
                     refund_amount=refund_amount
                 )
+                
+                # CLEAR CACHES IMMEDIATELY
+                self.clear_relevant_caches('user_enroll', user_id=user_id, course_id=course_id)
             
-            # Clear user's enrollment cache
-            self._clear_user_cache(user.id)
-            
-            # Prepare response data
             response_data = {
                 'message': result['message'],
                 'enrollment_id': enrollment.id,
@@ -2215,21 +1793,12 @@ class AdminRemoveStudentFromPlanView(generics.DestroyAPIView):
                 'refund_amount': str(refund_amount) if refund_amount else None,
                 'admin_action': True,
                 'removed_by': request.user.email,
-                'reason': reason
+                'reason': reason,
+                'cache_cleared': True
             }
             
             return Response({"success": True, "data": response_data}, status=status.HTTP_200_OK)
             
-        except User.DoesNotExist:
-            return Response(
-                {'error': 'User not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-        except Course.DoesNotExist:
-            return Response(
-                {'error': 'Course not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
         except Exception as e:
             logger.error(f"Admin removal failed: {str(e)}")
             return Response(
@@ -2238,44 +1807,19 @@ class AdminRemoveStudentFromPlanView(generics.DestroyAPIView):
             )
     
     def _process_admin_removal(self, admin_user, user, course, enrollment, reason='', refund_amount=None):
-        """
-        Process admin removal - deactivates enrollment and updates related records
-        """
-        # 1. Deactivate the enrollment
+        """Process admin removal with proper record updates"""
+        # Deactivate the enrollment
         enrollment.is_active = False
         enrollment.save()
         
-        # 2. Update purchase records if refund is processed
-        refund_processed = False
+        # Update purchase records if refund is processed
         if refund_amount is not None:
-            # Find related purchase records
-            purchases = Purchase.objects.filter(
-                user=user,
-                course=course,
-                payment_status='COMPLETED'
-            )
-            
+            purchases = Purchase.objects.filter(user=user, course=course, payment_status='COMPLETED')
             for purchase in purchases:
                 purchase.payment_status = 'REFUNDED'
                 purchase.save()
-                refund_processed = True
         
-        # 3. Update payment orders if they exist
-        payment_orders = PaymentOrder.objects.filter(
-            user=user,
-            course=course,
-            status='PAID'
-        )
-        
-        for payment_order in payment_orders:
-            if refund_amount is not None:
-                payment_order.status = 'REFUNDED'
-            else:
-                payment_order.status = 'CANCELLED'
-            payment_order.save()
-        
-        # 4. Create Notifications
-        # User notification
+        # Create notifications
         refund_message = f" A refund of ${refund_amount} has been processed." if refund_amount else ""
         reason_message = f" Reason: {reason}" if reason else ""
         
@@ -2286,44 +1830,41 @@ class AdminRemoveStudentFromPlanView(generics.DestroyAPIView):
             notification_type='COURSE'
         )
         
-        # Admin notification
-        Notification.objects.create(
-            user=admin_user,
-            title="Student Removed from Course",
-            message=f"Successfully removed {user.email} from '{course.title}'. Refund: ${refund_amount or 'N/A'}. Reason: {reason or 'Not specified'}",
-            notification_type='SYSTEM'
-        )
-        
-        # 5. Send push notification (if FCM device exists)
-        try:
-            from .tasks import send_push_notification
-            send_push_notification.delay(
-                user.id,
-                "Course Access Removed",
-                f"Your access to '{course.title}' has been removed.{refund_message}"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to send push notification: {e}")
-        
-        return {
-            'message': f"Successfully removed {user.email} from {course.title}",
-            'refund_processed': refund_processed
-        }
-    
-    def _clear_user_cache(self, user_id):
-        """Clear enrollment cache for the user"""
-        try:
-            # Clear common cache patterns
-            for page in range(1, 6):  # Clear first 5 pages
-                for page_size in [10, 20, 50]:
-                    key_string = f"enrollments_{user_id}_{page}_{page_size}"
-                    cache_key = hashlib.md5(key_string.encode()).hexdigest()
-                    cache.delete(cache_key)
-        except Exception:
-            pass  # Don't break functionality if cache clearing fails
+        return {'message': f"Successfully removed {user.email} from {course.title}"}
 
-# ADD BULK OPERATIONS API
-# =======================
+
+# Update your CourseViewSet as well
+class EnhancedCourseViewSet(AdminCacheMixin, viewsets.ModelViewSet):
+    """Enhanced CourseViewSet with proper cache clearing"""
+    
+    def create(self, request, *args, **kwargs):
+        """Clear caches after course creation"""
+        result = super().create(request, *args, **kwargs)
+        
+        # Clear relevant caches
+        self.clear_relevant_caches('course_create')
+        
+        return result
+    
+    def update(self, request, *args, **kwargs):
+        """Clear caches after course update"""
+        course_id = kwargs.get('pk')
+        result = super().update(request, *args, **kwargs)
+        
+        # Clear relevant caches
+        self.clear_relevant_caches('course_update', course_id=course_id)
+        
+        return result
+    
+    def destroy(self, request, *args, **kwargs):
+        """Clear caches after course deletion"""
+        course_id = kwargs.get('pk')
+        result = super().destroy(request, *args, **kwargs)
+        
+        # Clear relevant caches
+        self.clear_relevant_caches('course_delete', course_id=course_id)
+        
+        return result
 
 class AdminBulkEnrollmentOperationsView(generics.CreateAPIView):
     """

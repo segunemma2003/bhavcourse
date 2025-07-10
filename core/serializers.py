@@ -1,4 +1,5 @@
-from django.forms import ValidationError
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
 from django.utils import timezone
 import hashlib
 import os
@@ -20,7 +21,7 @@ from django.contrib.auth import authenticate
 from dj_rest_auth.serializers import LoginSerializer as BaseLoginSerializer
 import json
 import logging
-from django.contrib.auth.password_validation import validate_password
+
 
 logger = logging.getLogger(__name__)
 
