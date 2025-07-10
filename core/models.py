@@ -10,6 +10,7 @@ from datetime import timedelta
 from django.core.cache import cache
 from django.conf import settings
 import logging
+from .cache_manager import CacheManager
 
 logger = logging.getLogger(__name__)
 
@@ -117,11 +118,14 @@ class User(AbstractBaseUser, PermissionsMixin):
         # Clear user-related caches if profile updated - v8
         if not is_new:
             self._clear_user_caches()
+            CacheManager.clear_user_cache(self.id)
     
     def delete(self, *args, **kwargs):
         user_id = self.id
         result = super().delete(*args, **kwargs)
         self._clear_user_caches_on_delete(user_id)
+        CacheManager.clear_user_cache(user_id)
+        CacheManager.clear_admin_cache()
         return result
     
     def _clear_user_caches(self):
@@ -174,6 +178,35 @@ class Category(models.Model):
     def __str__(self):
         return self.name
     
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        
+        # Clear category-related caches
+        cache_patterns = [
+            "categories_list_{}",
+            f"category_detail_{self.id}",
+        ]
+        
+        CacheManager.clear_cache_patterns(cache_patterns, "")
+        
+        # Also clear course caches since categories affect course listings
+        CacheManager.clear_course_cache()
+    
+    def delete(self, *args, **kwargs):
+        category_id = self.id
+        result = super().delete(*args, **kwargs)
+        
+        # Clear all category and course caches
+        cache_patterns = [
+            "categories_list_{}",
+            f"category_detail_{category_id}",
+        ]
+        
+        CacheManager.clear_cache_patterns(cache_patterns, "")
+        CacheManager.clear_course_cache()
+        
+        return result
+    
     class Meta:
         verbose_name_plural = "Categories"
 
@@ -224,6 +257,16 @@ class CourseCurriculum(models.Model):
     def __str__(self):
         return f"{self.course.title} - {self.title}"
     
+    
+    def delete(self, *args, **kwargs):
+        course_id = self.course_id
+        result = super().delete(*args, **kwargs)
+        
+        # Clear course-related caches
+        CacheManager.clear_course_cache(course_id)
+        
+        return result
+    
     def save(self, *args, **kwargs):
         # Set status based on video_url
         if self.video_url:
@@ -241,7 +284,9 @@ class CourseCurriculum(models.Model):
         super().save(*args, **kwargs)
         
         # Clear related caches
+        
         self._clear_related_caches()
+        CacheManager.clear_course_cache(self.course_id)
     
     def _clear_related_caches(self):
         """Clear caches related to this curriculum item - UPDATED TO v8"""
@@ -349,11 +394,18 @@ class Course(models.Model):
         
         # Clear course-related caches - v8
         self._clear_course_caches(is_new)
+        CacheManager.clear_course_cache(self.id)
+        
+        if is_new:
+            # Clear additional caches for new courses
+            CacheManager.clear_admin_cache()
     
     def delete(self, *args, **kwargs):
         course_id = self.id
         result = super().delete(*args, **kwargs)
         self._clear_course_caches_on_delete(course_id)
+        CacheManager.clear_course_cache(course_id)
+        CacheManager.clear_admin_cache()
         return result
     
     def _clear_course_caches(self, is_new=False):
@@ -477,11 +529,13 @@ class Enrollment(models.Model):
         
         super().save(*args, **kwargs)
         self._clear_enrollment_caches()
+        CacheManager.clear_enrollment_cache(self.user_id, self.course_id)
     
     def delete(self, *args, **kwargs):
         user_id = self.user_id  # Store before deletion
         result = super().delete(*args, **kwargs)
         self._clear_enrollment_caches_for_user(user_id)
+        CacheManager.clear_enrollment_cache(user_id, self.course_id)
         return result
     
     def _clear_enrollment_caches(self):
@@ -627,11 +681,17 @@ class Wishlist(models.Model):
         super().save(*args, **kwargs)
         # Clear wishlist cache for this user - v8
         cache.delete(f"wishlist_v8_{self.user_id}")
+        cache_key = CacheManager._get_cache_key(f"wishlist_{self.user_id}")
+        from django.core.cache import cache
+        cache.delete(cache_key)
     
     def delete(self, *args, **kwargs):
         user_id = self.user_id
         result = super().delete(*args, **kwargs)
         cache.delete(f"wishlist_v8_{user_id}")
+        cache_key = CacheManager._get_cache_key(f"wishlist_{user_id}")
+        from django.core.cache import cache
+        cache.delete(cache_key)
         return result
 
 class PaymentCard(models.Model):
@@ -720,11 +780,37 @@ class Notification(models.Model):
         super().save(*args, **kwargs)
         # Clear notification caches for this user - v8
         self._clear_notification_caches()
+        cache_patterns = [
+            f"notifications_{self.user_id}_all",
+            f"notifications_{self.user_id}_true", 
+            f"notifications_{self.user_id}_false"
+        ]
+        
+        cache_keys = []
+        for pattern in cache_patterns:
+            cache_key = CacheManager._get_cache_key(pattern)
+            cache_keys.append(cache_key)
+        
+        from django.core.cache import cache
+        cache.delete_many(cache_keys)
     
     def delete(self, *args, **kwargs):
         user_id = self.user_id
         result = super().delete(*args, **kwargs)
         self._clear_notification_caches_for_user(user_id)
+        cache_patterns = [
+            f"notifications_{user_id}_all",
+            f"notifications_{user_id}_true", 
+            f"notifications_{user_id}_false"
+        ]
+        
+        cache_keys = []
+        for pattern in cache_patterns:
+            cache_key = CacheManager._get_cache_key(pattern)
+            cache_keys.append(cache_key)
+        
+        from django.core.cache import cache
+        cache.delete_many(cache_keys)
         return result
     
     def _clear_notification_caches(self):
