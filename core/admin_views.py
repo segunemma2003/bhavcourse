@@ -8,6 +8,8 @@ from django.utils import timezone
 from django.db import transaction
 from datetime import timedelta, datetime
 from django.db.models.functions import TruncDate, TruncWeek, TruncMonth
+
+from core.admin_cache_manager import EnhancedAdminCacheMixin
 from .models import Course, CoursePlanType, FCMDevice, Notification, PaymentCard, PaymentOrder, User, Purchase, ContentPage, GeneralSettings, UserSubscription, Wishlist
 from .serializers import (
     AdminMetricsSerializer, ContentPageSerializer, 
@@ -35,7 +37,7 @@ User = get_user_model()
 
 
 
-class AdminDeleteUserAccountView(AdminCacheMixin, generics.DestroyAPIView):
+class AdminDeleteUserAccountView(EnhancedAdminCacheMixin, generics.DestroyAPIView):
     """
     Admin API endpoint for deleting any user account by ID.
     This permanently deletes the user and all associated data.
@@ -98,7 +100,10 @@ class AdminDeleteUserAccountView(AdminCacheMixin, generics.DestroyAPIView):
             # ADDITIONAL cache clearing after deletion
             CacheManager.clear_admin_cache()
             CacheManager.clear_course_cache()  # In case user was in course lists
-            
+            self.clear_caches_after_operation(
+                    operation_type='user_delete',
+                    user_id=user_id
+                )
             # Prepare response
             response_data = {
                 'message': f'User account for {user_info["email"]} deleted successfully',
@@ -335,18 +340,13 @@ class AdminBulkDeleteUsersView(AdminCacheMixin, generics.CreateAPIView):
         """Same cleanup logic as single deletion"""
         admin_delete_view = AdminDeleteUserAccountView()
         return admin_delete_view._cleanup_user_data(user)
-class AdminAllStudentsView(generics.ListAPIView):
+    
+class AdminAllStudentsView(EnhancedAdminCacheMixin, generics.ListAPIView):
     """
     Admin API endpoint for retrieving ALL students (both enrolled and not enrolled) with their enrollment information.
     """
     permission_classes = [permissions.IsAuthenticated, IsAdminUser]
-
-# Add this import to the top of your urls.py file:
-# from core.admin_views import AdminAllStudentsView
-
-# Add this URL pattern to your urlpatterns list:
-# path('admin/all-students/', AdminAllStudentsView.as_view(), name='admin-all-students'),
-    
+        
     @swagger_auto_schema(
         operation_summary="Admin: Get all students with enrollment status",
         operation_description="""
@@ -1515,7 +1515,7 @@ class PublicContentPageView(ContentPageMixin, generics.RetrieveAPIView):
         return Response(serializer.data)
     
     
-class AdminAddStudentToPlanView(AdminCacheMixin, generics.CreateAPIView):
+class AdminAddStudentToPlanView(EnhancedAdminCacheMixin, generics.CreateAPIView):
     """
     Admin API endpoint for manually adding a student to a subscription plan.
     """
@@ -1610,7 +1610,12 @@ class AdminAddStudentToPlanView(AdminCacheMixin, generics.CreateAPIView):
                     payment_card=payment_card,
                     notes=notes
                 )
-                
+                self.clear_caches_after_operation(
+                    operation_type='user_enrollment',
+                    user_id=user_id,
+                    course_id=course_id,
+                    action='add'
+                )
                 # CLEAR CACHES IMMEDIATELY AFTER ENROLLMENT
                 self.clear_relevant_caches('user_enroll', user_id=user_id, course_id=course_id)
             

@@ -17,7 +17,7 @@ from .views import (
     AdminChangePasswordView, CategoryViewSet, CourseCurriculumViewSet, CourseObjectiveViewSet, CourseRequirementViewSet, CourseViewSet, 
     EnrollmentViewSet, NotificationViewSet, ProfilePictureDeleteView, ProfilePictureRetrieveView, ProfilePictureUploadView, PublicCourseDetailView, SimpleEnrollmentViewSet, SubscriptionPlanViewSet, UserChangePasswordView, UserProfileView, UserSubscriptionViewSet, 
     WishlistViewSet, PaymentCardViewSet, PurchaseViewSet, UpdateProfileView, LogoutView, DeleteAccountView, 
-    FCMDeviceViewSet, debug_enrollments, debug_login, CoursePurchaseView
+    FCMDeviceViewSet, CoursePurchaseView
 )
 from .auth_views import CustomLoginView, CustomRegisterView, ForgotPasswordView, ResetPasswordView, VerifyOTPView, GoogleLoginView
 
@@ -46,7 +46,6 @@ urlpatterns = [
     path('auth/reset-password/', ResetPasswordView.as_view(), name='reset-password'),
     path('auth/google/', GoogleLoginView.as_view(), name='google-login'),
     path('auth/logout/', LogoutView.as_view(), name='logout'),
-    path('auth/debug-login/', debug_login, name='debug-login'),
     path('admin/change-password/', AdminChangePasswordView.as_view(), name='admin-change-password'),
     
     # User password management endpoints  
@@ -147,5 +146,4 @@ urlpatterns = [
     path('profile/picture/delete/', ProfilePictureDeleteView.as_view(), name='profile-picture-delete'),
     path('profile/', UserProfileView.as_view(), name='user-profile'),
     path('auth/firebase-google/', FirebaseGoogleAuthView.as_view(), name='firebase-google'),
-    path('debug-enrollments/', debug_enrollments, name='debug-enrollments'),
 ]

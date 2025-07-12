@@ -2208,42 +2208,6 @@ class FCMDeviceViewSet(viewsets.ModelViewSet):
     
     
 
-@csrf_exempt
-def debug_login(request):
-    if request.method == 'POST':
-        try:
-            data = json.loads(request.body)
-            email = data.get('email')
-            password = data.get('password')
-            
-            # Check if user exists
-            try:
-                user = User.objects.get(email__iexact=email)
-                user_exists = True
-                has_password = bool(user.password)
-            except User.DoesNotExist:
-                user_exists = False
-                has_password = False
-            
-            # Try both authentication methods
-            auth_with_email = authenticate(request=request, email=email, password=password)
-            auth_with_username = authenticate(request=request, username=email, password=password)
-            
-            return JsonResponse({
-                'user_exists': user_exists,
-                'has_password': has_password,
-                'auth_with_email': bool(auth_with_email),
-                'auth_with_username': bool(auth_with_username),
-                'debug_info': {
-                    'email': email,
-                    'password_length': len(password) if password else 0
-                }
-            })
-        except Exception as e:
-            return JsonResponse({'error': str(e)})
-    
-    return JsonResponse({'error': 'Invalid request method'})
-
 
 
 class PublicCourseDetailView(generics.RetrieveAPIView):
@@ -3102,22 +3066,6 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
         )
 
 
-@api_view(['GET'])
-@permission_classes([permissions.IsAuthenticated])
-def debug_enrollments(request):
-    try:
-        enrollments = Enrollment.objects.filter(user=request.user)
-        return Response({
-            "count": enrollments.count(),
-            "user_id": request.user.id,
-            "status": "success"
-        })
-    except Exception as e:
-        return Response({
-            "error": str(e),
-            "error_type": type(e).__name__,
-            "user_id": request.user.id
-        })
 
 class AdminChangePasswordView(generics.GenericAPIView):
     """
