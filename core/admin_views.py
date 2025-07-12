@@ -1652,66 +1652,97 @@ class AdminAddStudentToPlanView(EnhancedAdminCacheMixin,AdminCacheMixin, generic
             )
     
     def _process_admin_enrollment(self, admin_user, user, course, plan_type, amount_paid, payment_card=None, notes=''):
-        """Process admin enrollment with comprehensive data creation"""
-        # Generate mock transaction ID
+        """
+        Process admin enrollment with smart payment handling:
+        - Reuse existing successful payments to avoid duplicates
+        - Only create new payment records when necessary
+        - Maintain proper audit trail
+        """
+        
+        # Generate unique identifiers for new payments (if needed)
         timestamp = int(time.time())
         transaction_id = f"ADMIN_{timestamp}_{uuid.uuid4().hex[:12].upper()}"
         mock_order_id = f"order_admin_{timestamp}_{uuid.uuid4().hex[:10]}"
         mock_payment_id = f"pay_admin_{timestamp}_{uuid.uuid4().hex[:10]}"
         
-        # Create or update PaymentOrder
-        payment_order, created = PaymentOrder.objects.get_or_create(
+        # SMART APPROACH: Check for existing successful payment first
+        payment_order = PaymentOrder.objects.filter(
             user=user,
             course=course,
-            defaults={
-                'amount': amount_paid,
-                'razorpay_order_id': mock_order_id,
-                'razorpay_payment_id': mock_payment_id,
-                'razorpay_signature': f"admin_signature_{uuid.uuid4().hex[:16]}",
-                'status': 'PAID'
-            }
-        )
+            status='PAID'
+        ).order_by('-created_at').first()
         
-        if not created:
-            payment_order.razorpay_payment_id = mock_payment_id
-            payment_order.status = 'PAID'
-            payment_order.save()
+        if payment_order:
+            logger.info(f"Reusing existing successful payment for {user.email} -> {course.title}")
+        else:
+            # Create new payment only if none exists
+            payment_order = PaymentOrder.objects.create(
+                user=user,
+                course=course,
+                amount=amount_paid,
+                razorpay_order_id=mock_order_id,
+                razorpay_payment_id=mock_payment_id,
+                razorpay_signature=f"admin_signature_{uuid.uuid4().hex[:16]}",
+                status='PAID'
+            )
+            logger.info(f"Created new payment order for admin enrollment: {user.email} -> {course.title}")
         
-        # Create Purchase record
-        purchase = Purchase.objects.create(
+        # SMART APPROACH: Check for existing successful purchase first
+        purchase = Purchase.objects.filter(
             user=user,
             course=course,
-            plan_type=plan_type,
-            amount=amount_paid,
-            transaction_id=transaction_id,
-            razorpay_order_id=mock_order_id,
-            razorpay_payment_id=mock_payment_id,
-            payment_status='COMPLETED',
-            payment_card=payment_card
-        )
+            payment_status='COMPLETED'
+        ).order_by('-created_at').first()
         
-        # Create or update Enrollment
-        enrollment, enrollment_created = Enrollment.objects.get_or_create(
+        if purchase:
+            logger.info(f"Reusing existing successful purchase for {user.email} -> {course.title}")
+        else:
+            # Create new purchase only if none exists
+            purchase = Purchase.objects.create(
+                user=user,
+                course=course,
+                plan_type=plan_type,
+                amount=amount_paid,
+                transaction_id=transaction_id,
+                razorpay_order_id=payment_order.razorpay_order_id,
+                razorpay_payment_id=payment_order.razorpay_payment_id,
+                payment_status='COMPLETED',
+                payment_card=payment_card
+            )
+            logger.info(f"Created new purchase record for admin enrollment: {user.email} -> {course.title}")
+        
+        # Handle enrollment - always update to ensure current plan is applied
+        enrollment = Enrollment.objects.filter(
             user=user,
             course=course,
-            defaults={
-                'plan_type': plan_type,
-                'amount_paid': amount_paid,
-                'is_active': True
-            }
-        )
+            is_active=True
+        ).order_by('-date_enrolled').first()
         
-        if not enrollment_created:
+        if enrollment:
+            # Update existing active enrollment with new plan
             enrollment.plan_type = plan_type
             enrollment.amount_paid = amount_paid
             enrollment.is_active = True
-            enrollment.save()
+            enrollment.date_enrolled = timezone.now()  # Update enrollment date
+            logger.info(f"Updated existing enrollment for {user.email} -> {course.title}")
+        else:
+            # Create new enrollment
+            enrollment = Enrollment.objects.create(
+                user=user,
+                course=course,
+                plan_type=plan_type,
+                amount_paid=amount_paid,
+                is_active=True,
+                date_enrolled=timezone.now()
+            )
+            logger.info(f"Created new enrollment for {user.email} -> {course.title}")
         
-        # Set expiry date
+        # Set expiry date based on plan type
+        current_time = timezone.now()
         if plan_type == CoursePlanType.ONE_MONTH:
-            enrollment.expiry_date = timezone.now() + timezone.timedelta(days=30)
+            enrollment.expiry_date = current_time + timezone.timedelta(days=30)
         elif plan_type == CoursePlanType.THREE_MONTHS:
-            enrollment.expiry_date = timezone.now() + timezone.timedelta(days=90)
+            enrollment.expiry_date = current_time + timezone.timedelta(days=90)
         elif plan_type == CoursePlanType.LIFETIME:
             enrollment.expiry_date = None
         
@@ -1736,7 +1767,9 @@ class AdminAddStudentToPlanView(EnhancedAdminCacheMixin,AdminCacheMixin, generic
             'message': f"Successfully enrolled {user.email} in {course.title} ({enrollment.get_plan_type_display()})",
             'purchase': purchase,
             'enrollment': enrollment,
-            'payment_order': payment_order
+            'payment_order': payment_order,
+            'payment_reused': payment_order.created_at < timezone.now() - timezone.timedelta(minutes=1),  # Rough check
+            'purchase_reused': purchase.created_at < timezone.now() - timezone.timedelta(minutes=1)  # Rough check
         }
 class AdminRemoveStudentFromPlanView(AdminCacheMixin, generics.DestroyAPIView):
     """Admin API endpoint for removing a student from a course subscription plan."""
