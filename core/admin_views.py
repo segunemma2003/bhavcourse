@@ -1769,7 +1769,7 @@ class AdminAddStudentToPlanView(EnhancedAdminCacheMixin,AdminCacheMixin, generic
             'enrollment': enrollment,
             'payment_order': payment_order,
             'payment_reused': payment_order.created_at < timezone.now() - timezone.timedelta(minutes=1),  # Rough check
-            'purchase_reused': purchase.created_at < timezone.now() - timezone.timedelta(minutes=1)  # Rough check
+            # 'purchase_reused': purchase.created_at < timezone.now() - timezone.timedelta(minutes=1)  # Rough check
         }
 class AdminRemoveStudentFromPlanView(AdminCacheMixin, generics.DestroyAPIView):
     """Admin API endpoint for removing a student from a course subscription plan."""
