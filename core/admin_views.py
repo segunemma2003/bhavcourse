@@ -662,7 +662,7 @@ class AdminAllStudentsView(EnhancedAdminCacheMixin, generics.ListAPIView):
             response_data['previous'] = f"{request.build_absolute_uri()}?page={page_obj.previous_page_number()}"
         
         # Cache for 5 minutes (admin data changes less frequently)
-        cache.set(cache_key, response_data, 300)
+        cache.set(cache_key, response_data, 2)
         
         return Response(response_data, status=status.HTTP_200_OK)
     
@@ -2421,7 +2421,7 @@ class AdminStudentEnrollmentsView(generics.RetrieveAPIView):
         }
         
         # Cache for 10 minutes
-        cache.set(cache_key, response_data, 600)
+        cache.set(cache_key, response_data, 2)
         
         return Response({"success": True, "data": response_data}, status=status.HTTP_200_OK)
     
