@@ -37,7 +37,7 @@ User = get_user_model()
 
 
 
-class AdminDeleteUserAccountView(EnhancedAdminCacheMixin, generics.DestroyAPIView):
+class AdminDeleteUserAccountView(EnhancedAdminCacheMixin,AdminCacheMixin, generics.DestroyAPIView):
     """
     Admin API endpoint for deleting any user account by ID.
     This permanently deletes the user and all associated data.
@@ -1515,7 +1515,7 @@ class PublicContentPageView(ContentPageMixin, generics.RetrieveAPIView):
         return Response(serializer.data)
     
     
-class AdminAddStudentToPlanView(EnhancedAdminCacheMixin, generics.CreateAPIView):
+class AdminAddStudentToPlanView(EnhancedAdminCacheMixin,AdminCacheMixin, generics.CreateAPIView):
     """
     Admin API endpoint for manually adding a student to a subscription plan.
     """
