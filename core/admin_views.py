@@ -6,6 +6,7 @@ from rest_framework.decorators import api_view, permission_classes
 from django.db.models import Count, Sum
 from django.utils import timezone
 from django.db import transaction
+import time
 from datetime import timedelta, datetime
 from django.db.models.functions import TruncDate, TruncWeek, TruncMonth
 
@@ -1653,9 +1654,10 @@ class AdminAddStudentToPlanView(EnhancedAdminCacheMixin,AdminCacheMixin, generic
     def _process_admin_enrollment(self, admin_user, user, course, plan_type, amount_paid, payment_card=None, notes=''):
         """Process admin enrollment with comprehensive data creation"""
         # Generate mock transaction ID
-        transaction_id = f"ADMIN_{uuid.uuid4().hex[:12].upper()}"
-        mock_order_id = f"order_admin_{uuid.uuid4().hex[:10]}"
-        mock_payment_id = f"pay_admin_{uuid.uuid4().hex[:10]}"
+        timestamp = int(time.time())
+        transaction_id = f"ADMIN_{timestamp}_{uuid.uuid4().hex[:12].upper()}"
+        mock_order_id = f"order_admin_{timestamp}_{uuid.uuid4().hex[:10]}"
+        mock_payment_id = f"pay_admin_{timestamp}_{uuid.uuid4().hex[:10]}"
         
         # Create or update PaymentOrder
         payment_order, created = PaymentOrder.objects.get_or_create(
