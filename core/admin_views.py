@@ -1652,30 +1652,41 @@ class AdminAddStudentToPlanView(EnhancedAdminCacheMixin,AdminCacheMixin, generic
             )
     
     def _process_admin_enrollment(self, admin_user, user, course, plan_type, amount_paid, payment_card=None, notes=''):
-        """
-        Process admin enrollment with smart payment handling:
-        - Reuse existing successful payments to avoid duplicates
-        - Only create new payment records when necessary
-        - Maintain proper audit trail
-        """
-        
-        # Generate unique identifiers for new payments (if needed)
+        """Process admin enrollment with comprehensive data creation"""
+        # Generate mock transaction ID
         timestamp = int(time.time())
         transaction_id = f"ADMIN_{timestamp}_{uuid.uuid4().hex[:12].upper()}"
         mock_order_id = f"order_admin_{timestamp}_{uuid.uuid4().hex[:10]}"
         mock_payment_id = f"pay_admin_{timestamp}_{uuid.uuid4().hex[:10]}"
         
-        # SMART APPROACH: Check for existing successful payment first
-        payment_order = PaymentOrder.objects.filter(
-            user=user,
-            course=course,
-            status='PAID'
-        ).order_by('-created_at').first()
-        
-        if payment_order:
-            logger.info(f"Reusing existing successful payment for {user.email} -> {course.title}")
-        else:
-            # Create new payment only if none exists
+        # FIXED: Check for existing successful payment first, create only if needed
+        try:
+            # Look for existing successful payment for this user+course combination
+            payment_order = PaymentOrder.objects.filter(
+                user=user,
+                course=course,
+                status='PAID'
+            ).order_by('id').last()  # Ascending order, take last = newest
+            
+            if payment_order:
+                # Reuse existing successful payment
+                logger.info(f"Reusing existing payment order {payment_order.id} for user {user.email} and course {course.title}")
+            else:
+                # Create new payment order only if no successful payment exists
+                payment_order = PaymentOrder.objects.create(
+                    user=user,
+                    course=course,
+                    amount=amount_paid,
+                    razorpay_order_id=mock_order_id,
+                    razorpay_payment_id=mock_payment_id,
+                    razorpay_signature=f"admin_signature_{uuid.uuid4().hex[:16]}",
+                    status='PAID'
+                )
+                logger.info(f"Created new payment order {payment_order.id} for admin enrollment")
+                
+        except Exception as e:
+            # Fallback: create new payment order
+            logger.warning(f"Payment order lookup failed, creating new: {str(e)}")
             payment_order = PaymentOrder.objects.create(
                 user=user,
                 course=course,
@@ -1685,64 +1696,92 @@ class AdminAddStudentToPlanView(EnhancedAdminCacheMixin,AdminCacheMixin, generic
                 razorpay_signature=f"admin_signature_{uuid.uuid4().hex[:16]}",
                 status='PAID'
             )
-            logger.info(f"Created new payment order for admin enrollment: {user.email} -> {course.title}")
         
-        # SMART APPROACH: Check for existing successful purchase first
-        purchase = Purchase.objects.filter(
-            user=user,
-            course=course,
-            payment_status='COMPLETED'
-        ).order_by('-created_at').first()
-        
-        if purchase:
-            logger.info(f"Reusing existing successful purchase for {user.email} -> {course.title}")
-        else:
-            # Create new purchase only if none exists
+        # Check for existing successful purchase first
+        try:
+            # Look for existing successful purchase for this user+course combination
+            purchase = Purchase.objects.filter(
+                user=user,
+                course=course,
+                payment_status='COMPLETED'
+            ).order_by('id').last()  # Ascending order, take last = newest
+            
+            if purchase:
+                # Reuse existing successful purchase
+                logger.info(f"Reusing existing purchase {purchase.id} for user {user.email} and course {course.title}")
+            else:
+                # Create new purchase record only if no successful purchase exists
+                purchase = Purchase.objects.create(
+                    user=user,
+                    course=course,
+                    plan_type=plan_type,
+                    amount=amount_paid,
+                    transaction_id=transaction_id,
+                    razorpay_order_id=mock_order_id,
+                    razorpay_payment_id=mock_payment_id,
+                    payment_status='COMPLETED',
+                    payment_card=payment_card
+                )
+                logger.info(f"Created new purchase {purchase.id} for admin enrollment")
+                
+        except Exception as e:
+            # Fallback: create new purchase
+            logger.warning(f"Purchase lookup failed, creating new: {str(e)}")
             purchase = Purchase.objects.create(
                 user=user,
                 course=course,
                 plan_type=plan_type,
                 amount=amount_paid,
                 transaction_id=transaction_id,
-                razorpay_order_id=payment_order.razorpay_order_id,
-                razorpay_payment_id=payment_order.razorpay_payment_id,
+                razorpay_order_id=mock_order_id,
+                razorpay_payment_id=mock_payment_id,
                 payment_status='COMPLETED',
                 payment_card=payment_card
             )
-            logger.info(f"Created new purchase record for admin enrollment: {user.email} -> {course.title}")
         
-        # Handle enrollment - always update to ensure current plan is applied
-        enrollment = Enrollment.objects.filter(
-            user=user,
-            course=course,
-            is_active=True
-        ).order_by('-date_enrolled').first()
-        
-        if enrollment:
-            # Update existing active enrollment with new plan
-            enrollment.plan_type = plan_type
-            enrollment.amount_paid = amount_paid
-            enrollment.is_active = True
-            enrollment.date_enrolled = timezone.now()  # Update enrollment date
-            logger.info(f"Updated existing enrollment for {user.email} -> {course.title}")
-        else:
-            # Create new enrollment
+        # FIXED: Handle enrollment more safely to avoid multiple objects issues
+        try:
+            # Try to get the most recent active enrollment
+            enrollment = Enrollment.objects.filter(
+                user=user,
+                course=course,
+                is_active=True
+            ).order_by('id').last()  # Ascending order, take last = newest
+            
+            if enrollment:
+                # Update existing active enrollment
+                enrollment.plan_type = plan_type
+                enrollment.amount_paid = amount_paid
+                enrollment.is_active = True
+                enrollment_created = False
+            else:
+                # Create new enrollment if no active one exists
+                enrollment = Enrollment.objects.create(
+                    user=user,
+                    course=course,
+                    plan_type=plan_type,
+                    amount_paid=amount_paid,
+                    is_active=True
+                )
+                enrollment_created = True
+                
+        except Exception as e:
+            # Fallback: create a new enrollment
+            logger.warning(f"Enrollment lookup failed, creating new: {str(e)}")
             enrollment = Enrollment.objects.create(
                 user=user,
                 course=course,
                 plan_type=plan_type,
                 amount_paid=amount_paid,
-                is_active=True,
-                date_enrolled=timezone.now()
+                is_active=True
             )
-            logger.info(f"Created new enrollment for {user.email} -> {course.title}")
+            enrollment_created = True
         
-        # Set expiry date based on plan type
-        current_time = timezone.now()
+        # Set expiry date
         if plan_type == CoursePlanType.ONE_MONTH:
-            enrollment.expiry_date = current_time + timezone.timedelta(days=30)
+            enrollment.expiry_date = timezone.now() + timezone.timedelta(days=30)
         elif plan_type == CoursePlanType.THREE_MONTHS:
-            enrollment.expiry_date = current_time + timezone.timedelta(days=90)
+            enrollment.expiry_date = timezone.now() + timezone.timedelta(days=90)
         elif plan_type == CoursePlanType.LIFETIME:
             enrollment.expiry_date = None
         
@@ -1767,10 +1806,9 @@ class AdminAddStudentToPlanView(EnhancedAdminCacheMixin,AdminCacheMixin, generic
             'message': f"Successfully enrolled {user.email} in {course.title} ({enrollment.get_plan_type_display()})",
             'purchase': purchase,
             'enrollment': enrollment,
-            'payment_order': payment_order,
-            'payment_reused': payment_order.created_at < timezone.now() - timezone.timedelta(minutes=1),  # Rough check
-            # 'purchase_reused': purchase.created_at < timezone.now() - timezone.timedelta(minutes=1)  # Rough check
+            'payment_order': payment_order
         }
+    
 class AdminRemoveStudentFromPlanView(AdminCacheMixin, generics.DestroyAPIView):
     """Admin API endpoint for removing a student from a course subscription plan."""
     permission_classes = [permissions.IsAuthenticated, IsAdminUser]
@@ -2111,24 +2149,43 @@ class AdminBulkEnrollmentOperationsView(generics.CreateAPIView):
             else:
                 amount_paid = Decimal('0.00')
         
-        # Process enrollment (simplified version)
-        enrollment, created = Enrollment.objects.get_or_create(
-            user=user,
-            course=course,
-            defaults={
-                'plan_type': plan_type,
-                'amount_paid': amount_paid,
-                'is_active': True,
-                'date_enrolled': timezone.now()  # Set date_enrolled explicitly
-            }
-        )
-        
-        if not created:
-            enrollment.plan_type = plan_type
-            enrollment.amount_paid = amount_paid
-            enrollment.is_active = True
-            enrollment.date_enrolled = timezone.now()  # Update date_enrolled
-            enrollment.save()
+        # FIXED: Handle enrollment more safely to avoid multiple objects issues
+        try:
+            # Try to get the most recent active enrollment
+            enrollment = Enrollment.objects.filter(
+                user=user,
+                course=course,
+                is_active=True
+            ).order_by('id').last()  # Ascending order, take last = newest
+            
+            if enrollment:
+                # Update existing active enrollment
+                enrollment.plan_type = plan_type
+                enrollment.amount_paid = amount_paid
+                enrollment.is_active = True
+                enrollment.date_enrolled = timezone.now()  # Update date_enrolled
+            else:
+                # Create new enrollment if no active one exists
+                enrollment = Enrollment.objects.create(
+                    user=user,
+                    course=course,
+                    plan_type=plan_type,
+                    amount_paid=amount_paid,
+                    is_active=True,
+                    date_enrolled=timezone.now()
+                )
+                
+        except Exception as e:
+            # Fallback: create a new enrollment
+            logger.warning(f"Bulk enrollment lookup failed, creating new: {str(e)}")
+            enrollment = Enrollment.objects.create(
+                user=user,
+                course=course,
+                plan_type=plan_type,
+                amount_paid=amount_paid,
+                is_active=True,
+                date_enrolled=timezone.now()
+            )
         
         # Set expiry date using current time
         current_time = timezone.now()
