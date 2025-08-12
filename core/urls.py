@@ -10,7 +10,11 @@ from core.admin_views import (
     EnrolledStudentsListView, GeneralSettingsView, 
     PublicContentPageView, UserListView
 )
-from core.firebase_auth_view import FirebaseGoogleAuthView
+from core.firebase_auth_view import FirebaseGoogleAuthView, FirebaseAppleAuthView
+from core.apple_iap_views import (
+    AppleIAPVerifyReceiptView, AppleIAPProductsView, 
+    AppleIAPProductDetailView, apple_iap_webhook
+)
 from core.payment_views import CreateOrderView, VerifyPaymentView, cancel_subscription, razorpay_webhook, renew_subscription
 from core.views_presign import GeneratePresignedURLView, S3DebugView
 from .views import (
@@ -146,4 +150,11 @@ urlpatterns = [
     path('profile/picture/delete/', ProfilePictureDeleteView.as_view(), name='profile-picture-delete'),
     path('profile/', UserProfileView.as_view(), name='user-profile'),
     path('auth/firebase-google/', FirebaseGoogleAuthView.as_view(), name='firebase-google'),
+    path('auth/firebase-apple/', FirebaseAppleAuthView.as_view(), name='firebase-apple'),
+    
+    # Apple IAP endpoints
+    path('apple-iap/verify-receipt/', AppleIAPVerifyReceiptView.as_view(), name='apple-iap-verify'),
+    path('apple-iap/products/', AppleIAPProductsView.as_view(), name='apple-iap-products'),
+    path('apple-iap/products/<str:product_id>/', AppleIAPProductDetailView.as_view(), name='apple-iap-product-detail'),
+    path('apple-iap/webhook/', apple_iap_webhook, name='apple-iap-webhook'),
 ]

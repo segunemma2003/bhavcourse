@@ -740,6 +740,25 @@ class Purchase(models.Model):
         )
     )
     
+    # Apple IAP fields
+    apple_transaction_id = models.CharField(max_length=100, blank=True, null=True, unique=True)
+    apple_product_id = models.CharField(max_length=100, blank=True, null=True)
+    apple_receipt_data = models.TextField(blank=True, null=True)
+    apple_verification_status = models.CharField(max_length=20, default='PENDING',
+        choices=(
+            ('PENDING', 'Pending'),
+            ('VERIFIED', 'Verified'),
+            ('FAILED', 'Failed'),
+            ('EXPIRED', 'Expired')
+        )
+    )
+    payment_gateway = models.CharField(max_length=20, default='RAZORPAY',
+        choices=(
+            ('RAZORPAY', 'Razorpay'),
+            ('APPLE_IAP', 'Apple In-App Purchase')
+        )
+    )
+    
     def __str__(self):
         course_title = self.course.title if self.course else "Unknown Course"
         return f"{self.user.email if self.user else 'Unknown User'} - {course_title}"
@@ -750,6 +769,52 @@ class Purchase(models.Model):
             models.Index(fields=['user', 'payment_status']),
             models.Index(fields=['purchase_date']),
             models.Index(fields=['transaction_id']),
+            models.Index(fields=['apple_transaction_id']),
+            models.Index(fields=['payment_gateway']),
+        ]
+
+
+class AppleIAPProduct(models.Model):
+    """Apple IAP Product configuration"""
+    product_id = models.CharField(max_length=100, unique=True, help_text="Apple Product ID (e.g., com.yourapp.course1_monthly)")
+    course = models.ForeignKey(Course, related_name='apple_products', on_delete=models.CASCADE)
+    plan_type = models.CharField(max_length=20, choices=CoursePlanType.choices)
+    price_usd = models.DecimalField(max_digits=10, decimal_places=2, help_text="Price in USD")
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    def __str__(self):
+        return f"{self.product_id} - {self.course.title} ({self.get_plan_type_display()})"
+    
+    class Meta:
+        indexes = [
+            models.Index(fields=['product_id', 'is_active']),
+            models.Index(fields=['course', 'plan_type']),
+        ]
+
+
+class AppleIAPReceipt(models.Model):
+    """Apple IAP Receipt verification records"""
+    purchase = models.OneToOneField(Purchase, related_name='apple_receipt', on_delete=models.CASCADE)
+    receipt_data = models.TextField(help_text="Base64 encoded receipt data")
+    verification_response = models.JSONField(default=dict, help_text="Apple's verification response")
+    verification_date = models.DateTimeField(auto_now_add=True)
+    is_valid = models.BooleanField(default=False)
+    environment = models.CharField(max_length=20, default='Production',
+        choices=(
+            ('Production', 'Production'),
+            ('Sandbox', 'Sandbox')
+        )
+    )
+    
+    def __str__(self):
+        return f"Receipt for {self.purchase.transaction_id}"
+    
+    class Meta:
+        indexes = [
+            models.Index(fields=['verification_date']),
+            models.Index(fields=['is_valid', 'environment']),
         ]
 
 class Notification(models.Model):

@@ -14,7 +14,7 @@ from dj_rest_auth.registration.serializers import RegisterSerializer
 from core.s3_utils import generate_presigned_url, is_s3_url
 from .models import (Category, ContentPage, Course, CourseObjective, CoursePlanType, CourseRequirement, CourseCurriculum, Enrollment, FCMDevice, GeneralSettings, Notification, PaymentOrder, 
                      SubscriptionPlan, PlanFeature, UserSubscription, 
-                    Wishlist, PaymentCard, Purchase
+                    Wishlist, PaymentCard, Purchase, AppleIAPProduct, AppleIAPReceipt
                     )
 from django.db import transaction
 from django.contrib.auth import authenticate
@@ -1175,6 +1175,36 @@ class ResetPasswordSerializer(serializers.Serializer):
     
 class FirebaseAuthSerializer(serializers.Serializer):
     id_token = serializers.CharField(required=True)
+
+
+class FirebaseAppleAuthSerializer(serializers.Serializer):
+    id_token = serializers.CharField(required=True)
+    nonce = serializers.CharField(required=False, allow_blank=True)
+
+
+class AppleIAPProductSerializer(serializers.ModelSerializer):
+    course_title = serializers.CharField(source='course.title', read_only=True)
+    plan_name = serializers.CharField(source='get_plan_type_display', read_only=True)
+    
+    class Meta:
+        model = AppleIAPProduct
+        fields = [
+            'id', 'product_id', 'course', 'course_title', 'plan_type', 
+            'plan_name', 'price_usd', 'is_active', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['created_at', 'updated_at']
+
+
+class AppleIAPReceiptSerializer(serializers.ModelSerializer):
+    purchase_transaction_id = serializers.CharField(source='purchase.transaction_id', read_only=True)
+    
+    class Meta:
+        model = AppleIAPReceipt
+        fields = [
+            'id', 'purchase', 'purchase_transaction_id', 'verification_date',
+            'is_valid', 'environment'
+        ]
+        read_only_fields = ['verification_date']
     
     
 class StudentEnrollmentDetailSerializer(serializers.ModelSerializer):
