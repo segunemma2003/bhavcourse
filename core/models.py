@@ -817,6 +817,81 @@ class AppleIAPReceipt(models.Model):
             models.Index(fields=['is_valid', 'environment']),
         ]
 
+
+class PaymentLinkRequest(models.Model):
+    """Payment link requests for course enrollment"""
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='payment_link_requests', on_delete=models.CASCADE)
+    course = models.ForeignKey(Course, related_name='payment_link_requests', on_delete=models.CASCADE)
+    plan_type = models.CharField(max_length=20, choices=CoursePlanType.choices)
+    
+    # Payment link details
+    payment_link_id = models.CharField(max_length=100, unique=True, help_text="Unique identifier for the payment link")
+    payment_link_url = models.URLField(blank=True, null=True, help_text="Generated payment link URL")
+    
+    # Request status
+    status = models.CharField(max_length=20, default='PENDING',
+        choices=(
+            ('PENDING', 'Pending'),
+            ('EMAIL_SENT', 'Email Sent'),
+            ('PAYMENT_COMPLETED', 'Payment Completed'),
+            ('ENROLLMENT_COMPLETED', 'Enrollment Completed'),
+            ('EXPIRED', 'Expired'),
+            ('CANCELLED', 'Cancelled')
+        )
+    )
+    
+    # Email tracking
+    email_sent_at = models.DateTimeField(null=True, blank=True)
+    email_sent_count = models.PositiveIntegerField(default=0)
+    
+    # Payment details (filled when payment is completed)
+    payment_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    payment_method = models.CharField(max_length=50, blank=True, null=True)
+    payment_date = models.DateTimeField(null=True, blank=True)
+    
+    # Admin contact
+    admin_contacted = models.BooleanField(default=False)
+    admin_notes = models.TextField(blank=True, null=True)
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    expires_at = models.DateTimeField(help_text="Link expiration date")
+    
+    def __str__(self):
+        return f"Payment Link: {self.user.email} - {self.course.title} ({self.get_plan_type_display()})"
+    
+    @property
+    def is_expired(self):
+        """Check if the payment link has expired"""
+        return timezone.now() > self.expires_at
+    
+    @property
+    def days_until_expiry(self):
+        """Get days remaining until expiry"""
+        if self.is_expired:
+            return 0
+        delta = self.expires_at - timezone.now()
+        return delta.days
+    
+    def get_payment_amount(self):
+        """Get payment amount based on course and plan type"""
+        if self.plan_type == CoursePlanType.ONE_MONTH:
+            return self.course.price_one_month
+        elif self.plan_type == CoursePlanType.THREE_MONTHS:
+            return self.course.price_three_months
+        elif self.plan_type == CoursePlanType.LIFETIME:
+            return self.course.price_lifetime
+        return 0
+    
+    class Meta:
+        indexes = [
+            models.Index(fields=['payment_link_id']),
+            models.Index(fields=['status', 'created_at']),
+            models.Index(fields=['user', 'status']),
+            models.Index(fields=['expires_at']),
+        ]
+
 class Notification(models.Model):
     NOTIFICATION_TYPES = (
         ('SUBSCRIPTION', 'Subscription'),
@@ -968,11 +1043,24 @@ class PaymentOrder(models.Model):
             ('CREATED', 'Created'),
             ('PAID', 'Paid'),
             ('FAILED', 'Failed'),
-            ('REFUNDED', 'Refunded')
+            ('REFUNDED', 'Refunded'),
+            ('LINK_REQUESTED', 'Link Requested'),
+            ('LINK_EXPIRED', 'Link Expired')
         )
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    
+    # Payment link fields
+    reference_id = models.CharField(max_length=100, blank=True, null=True, unique=True)
+    payment_method = models.CharField(max_length=20, default='RAZORPAY',
+        choices=(
+            ('RAZORPAY', 'Razorpay'),
+            ('PAYMENT_LINK', 'Payment Link')
+        )
+    )
+    plan_type = models.CharField(max_length=20, choices=CoursePlanType.choices, null=True, blank=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
     
     def __str__(self):
         return f"{self.user.email} - {self.razorpay_order_id}"

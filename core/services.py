@@ -76,6 +76,66 @@ class RazorpayService:
             logger.error(f"Payment verification failed: {str(e)}")
             raise
     
+    def create_payment_link(self, data):
+        """
+        Create a Razorpay payment link
+        
+        Args:
+            data: Dictionary containing payment link data
+                - amount: Amount in paise
+                - currency: Currency code
+                - reference_id: Reference ID
+                - description: Payment description
+                - callback_url: Callback URL
+                - callback_method: Callback method (get/post)
+                - notes: Additional notes
+                
+        Returns:
+            dict: Payment link details
+        """
+        try:
+            payment_link_data = {
+                'amount': data['amount'],
+                'currency': data.get('currency', 'INR'),
+                'reference_id': data['reference_id'],
+                'description': data['description'],
+                'callback_url': data['callback_url'],
+                'callback_method': data.get('callback_method', 'get'),
+                'notes': data.get('notes', {})
+            }
+            
+            payment_link = self.client.payment_link.create(payment_link_data)
+            return {
+                'success': True,
+                'id': payment_link['id'],
+                'short_url': payment_link['short_url'],
+                'long_url': payment_link['long_url']
+            }
+            
+        except Exception as e:
+            logger.error(f"Razorpay payment link creation failed: {str(e)}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
+    
+    def verify_payment(self, payment_id):
+        """
+        Verify payment using payment ID
+        
+        Args:
+            payment_id: Razorpay Payment ID
+            
+        Returns:
+            bool: True if payment is valid
+        """
+        try:
+            payment = self.client.payment.fetch(payment_id)
+            return payment['status'] == 'captured'
+        except Exception as e:
+            logger.error(f"Payment verification failed: {str(e)}")
+            return False
+    
     # Keep your existing methods but modify verify_payment_signature
     def verify_payment_signature(self, payment_id, order_id=None, signature=None):
         """

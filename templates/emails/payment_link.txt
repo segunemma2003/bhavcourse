@@ -1,0 +1,26 @@
+Payment Link Generated - Complete Your Course Purchase
+
+Hello {{ user_name }},
+
+Your payment link for the course has been generated successfully. Please use the link below to complete your purchase.
+
+COURSE DETAILS:
+- Course: {{ course_title }}
+- Description: {{ course_description }}
+- Plan Type: {{ plan_type }}
+- Amount: ₹{{ amount }}
+- Reference ID: {{ reference_id }}
+- Valid Until: {{ expiry_date }}
+
+PAYMENT LINK:
+{{ payment_link }}
+
+IMPORTANT: This payment link will expire on {{ expiry_date }}. Please complete your payment before the expiry date.
+
+If you have any questions or need assistance, please contact our support team at {{ support_email }}.
+
+Thank you for choosing our platform!
+
+---
+This is an automated email. Please do not reply to this message.
+If you didn't request this payment link, please ignore this email. 

@@ -15,6 +15,10 @@ from core.apple_iap_views import (
     AppleIAPVerifyReceiptView, AppleIAPProductsView, 
     AppleIAPProductDetailView, apple_iap_webhook
 )
+from core.payment_link_views import (
+    CreatePaymentLinkView, PaymentLinkStatusView, 
+    verify_payment_link_payment, payment_link_callback
+)
 from core.payment_views import CreateOrderView, VerifyPaymentView, cancel_subscription, razorpay_webhook, renew_subscription
 from core.views_presign import GeneratePresignedURLView, S3DebugView
 from .views import (
@@ -157,4 +161,10 @@ urlpatterns = [
     path('apple-iap/products/', AppleIAPProductsView.as_view(), name='apple-iap-products'),
     path('apple-iap/products/<str:product_id>/', AppleIAPProductDetailView.as_view(), name='apple-iap-product-detail'),
     path('apple-iap/webhook/', apple_iap_webhook, name='apple-iap-webhook'),
+    
+    # Payment Link endpoints
+    path('payment-links/create/', CreatePaymentLinkView.as_view(), name='create-payment-link'),
+    path('payment-links/status/', PaymentLinkStatusView.as_view(), name='payment-link-status'),
+    path('payment-links/verify/', verify_payment_link_payment, name='verify-payment-link'),
+    path('payment-links/callback/', payment_link_callback, name='payment-link-callback'),
 ]
