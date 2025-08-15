@@ -9,7 +9,7 @@ from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 import logging
 
-from .models import Course, AppleIAPProduct, Purchase, Enrollment, Notification
+from .models import Course, CoursePlanType, AppleIAPProduct, Purchase, Enrollment, Notification
 from .apple_iap_service import AppleIAPService
 from .serializers import AppleIAPProductSerializer
 
@@ -110,7 +110,7 @@ class AppleIAPProductsView(views.APIView):
     class CreateProductSerializer(serializers.Serializer):
         product_id = serializers.CharField(max_length=100, help_text="Apple Product ID")
         course_id = serializers.IntegerField()
-        plan_type = serializers.ChoiceField(choices=Course.CoursePlanType.choices)
+        plan_type = serializers.ChoiceField(choices=CoursePlanType.choices)
         price_usd = serializers.DecimalField(max_digits=10, decimal_places=2)
         
         def validate_course_id(self, value):
