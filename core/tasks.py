@@ -4,7 +4,7 @@ from django.core.mail import send_mail
 from django.conf import settings
 from django.core.cache import cache
 
-from core.views_optimized import CacheWarmingService
+# from core.views_optimized import CacheWarmingService
 from .models import Course, CoursePlanType, Enrollment, UserSubscription, Notification, FCMDevice, CourseCurriculum
 from django.contrib.auth import get_user_model
 from .firebase import send_firebase_message, send_bulk_notifications

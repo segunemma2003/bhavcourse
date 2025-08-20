@@ -55,8 +55,19 @@ class PaymentLinkService:
                         'error': 'Invalid plan type'
                     }
             
+            # Validate amount
+            if not amount or amount <= 0:
+                return {
+                    'success': False,
+                    'error': 'Invalid amount for this course and plan'
+                }
+            
             # Generate unique reference ID
             reference_id = f"link_{str(uuid.uuid4())[:8]}"
+            
+            # Get base URL for callback
+            base_url = getattr(settings, 'BASE_URL', 'http://localhost:8000')
+            callback_url = f"{base_url}/api/payment-links/callback/"
             
             # Create payment order record
             payment_order = PaymentOrder.objects.create(
@@ -71,11 +82,11 @@ class PaymentLinkService:
             
             # Generate payment link using Razorpay
             payment_link_data = {
-                'amount': float(amount) * 100,  # Convert to paise
+                'amount': int(float(amount) * 100),  # Convert to paise and ensure integer
                 'currency': 'INR',
                 'reference_id': reference_id,
                 'description': f'Payment for {course.title} - {dict(CoursePlanType.choices)[plan_type]}',
-                'callback_url': f"{settings.BASE_URL}/api/payment-links/verify/",
+                'callback_url': callback_url,
                 'callback_method': 'get',
                 'notes': {
                     'user_id': str(user.id),
@@ -96,47 +107,58 @@ class PaymentLinkService:
                 payment_order.status = 'FAILED'
                 payment_order.save()
                 
+                logger.error(f"Razorpay payment link creation failed: {razorpay_response.get('error')}")
                 return {
                     'success': False,
-                    'error': 'Failed to generate payment link'
+                    'error': f"Failed to generate payment link: {razorpay_response.get('error', 'Unknown error')}"
                 }
             
-            # Update payment order with Razorpay link ID
-            payment_order.razorpay_order_id = razorpay_response.get('id')
-            payment_order.save()
+            # Update payment order with Razorpay link ID (only if not already set)
+            if not payment_order.razorpay_order_id:
+                payment_order.razorpay_order_id = razorpay_response.get('id')
+                payment_order.save()
             
-            # Send email to user
-            email_sent = self._send_payment_link_email(
-                user=user,
-                course=course,
-                plan_type=plan_type,
-                amount=amount,
-                payment_link=razorpay_response.get('short_url'),
-                reference_id=reference_id
-            )
+            # Send email to user (optional - don't fail if email fails)
+            email_sent = False
+            try:
+                email_sent = self._send_payment_link_email(
+                    user=user,
+                    course=course,
+                    plan_type=plan_type,
+                    amount=amount,
+                    payment_link=razorpay_response.get('short_url'),
+                    reference_id=reference_id
+                )
+            except Exception as email_error:
+                logger.error(f"Failed to send payment link email: {str(email_error)}")
+                # Don't fail the entire request if email fails
             
             # Create notification
-            Notification.objects.create(
-                user=user,
-                title="Payment Link Generated",
-                message=f"Payment link for {course.title} has been sent to your email.",
-                notification_type='PAYMENT',
-                is_seen=False
-            )
+            try:
+                Notification.objects.create(
+                    user=user,
+                    title="Payment Link Generated",
+                    message=f"Payment link for {course.title} has been sent to your email.",
+                    notification_type='PAYMENT',
+                    is_seen=False
+                )
+            except Exception as notification_error:
+                logger.error(f"Failed to create notification: {str(notification_error)}")
             
             return {
                 'success': True,
                 'message': 'Payment link request initiated successfully. Check your email for the payment link.',
                 'reference_id': reference_id,
                 'payment_order_id': payment_order.id,
-                'email_sent': email_sent
+                'email_sent': email_sent,
+                'payment_link': razorpay_response.get('short_url')  # Return link in response for immediate use
             }
             
         except Exception as e:
             logger.error(f"Payment link creation failed: {str(e)}")
             return {
                 'success': False,
-                'error': 'Failed to create payment link request'
+                'error': f'Failed to create payment link request: {str(e)}'
             }
     
     def _send_payment_link_email(self, user, course, plan_type, amount, payment_link, reference_id):
@@ -155,13 +177,18 @@ class PaymentLinkService:
             bool: True if email sent successfully
         """
         try:
+            # Check if email settings are configured
+            if not getattr(settings, 'EMAIL_HOST_USER', None):
+                logger.warning("Email settings not configured. Skipping email send.")
+                return False
+            
             subject = f"Payment Link for {course.title} - {dict(CoursePlanType.choices)[plan_type]}"
             
             # Email context
             context = {
-                'user_name': user.full_name,
+                'user_name': user.full_name or user.email.split('@')[0],
                 'course_title': course.title,
-                'course_description': course.small_desc,
+                'course_description': course.small_desc or course.description[:100] + '...' if course.description else 'Course description',
                 'plan_type': dict(CoursePlanType.choices)[plan_type],
                 'amount': amount,
                 'payment_link': payment_link,
@@ -171,14 +198,37 @@ class PaymentLinkService:
             }
             
             # Render email template
-            html_message = render_to_string('emails/payment_link.html', context)
-            plain_message = render_to_string('emails/payment_link.txt', context)
+            try:
+                html_message = render_to_string('emails/payment_link.html', context)
+                plain_message = render_to_string('emails/payment_link.txt', context)
+            except Exception as template_error:
+                logger.error(f"Failed to render email templates: {str(template_error)}")
+                # Fallback to simple text email
+                plain_message = f"""
+Payment Link for {course.title}
+
+Hello {context['user_name']},
+
+Your payment link for the course has been generated successfully.
+
+Course: {course.title}
+Plan: {context['plan_type']}
+Amount: ₹{amount}
+Reference ID: {reference_id}
+
+Payment Link: {payment_link}
+
+This link will expire on {context['expiry_date']}.
+
+Thank you!
+                """
+                html_message = None
             
             # Send email
             send_mail(
                 subject=subject,
                 message=plain_message,
-                from_email=settings.DEFAULT_FROM_EMAIL,
+                from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@yourapp.com'),
                 recipient_list=[user.email],
                 html_message=html_message,
                 fail_silently=False

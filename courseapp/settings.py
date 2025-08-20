@@ -372,8 +372,6 @@ if not os.path.exists(LOGS_DIR):
 #     }
 # }
 
-
-
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.mysql',
@@ -444,6 +442,20 @@ RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID')  # Replace with your key
 RAZORPAY_KEY_SECRET = os.environ.get('RAZORPAY_KEY_SECRET')   # Replace with your secret
 RAZORPAY_CURRENCY = 'INR'     
 RAZORPAY_WEBHOOK_SECRET= os.environ.get('RAZORPAY_WEBHOOK_SECRET')  # Replace with your webhook secret
+
+# Payment Link Configuration
+BASE_URL = os.environ.get('BASE_URL', 'http://localhost:8000')
+FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
+SUPPORT_EMAIL = os.environ.get('SUPPORT_EMAIL', 'support@yourapp.com')
+
+# Email Configuration for Payment Links
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT = int(os.environ.get('EMAIL_PORT', 587))
+EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'True').lower() == 'true'
+EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', 'your-email@gmail.com')
+EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', 'your-app-password')
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'your-email@gmail.com')
 
 AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID")  # Replace with your actual access key
 AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY")  # Replace with your actual secret key

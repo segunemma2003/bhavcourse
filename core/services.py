@@ -108,8 +108,8 @@ class RazorpayService:
             return {
                 'success': True,
                 'id': payment_link['id'],
-                'short_url': payment_link['short_url'],
-                'long_url': payment_link['long_url']
+                'short_url': payment_link.get('short_url', ''),
+                'long_url': payment_link.get('long_url', payment_link.get('url', ''))
             }
             
         except Exception as e:
