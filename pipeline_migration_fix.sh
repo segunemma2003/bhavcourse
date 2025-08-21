@@ -3,29 +3,9 @@
 # Migration Conflict Fix for CI/CD Pipeline
 # Add this to your deployment pipeline before running migrations
 
-echo "🔧 Running migration conflict fix..."
+set -e  # Exit on any error
 
-# Install MySQL client if not already installed
-install_mysql_client() {
-    echo "📦 Installing MySQL client dependencies..."
-    
-    # Check if we're on Ubuntu/Debian
-    if command -v apt-get &> /dev/null; then
-        sudo apt-get update
-        sudo apt-get install -y default-libmysqlclient-dev build-essential pkg-config
-    # Check if we're on CentOS/RHEL
-    elif command -v yum &> /dev/null; then
-        sudo yum install -y mysql-devel gcc
-    # Check if we're on macOS
-    elif command -v brew &> /dev/null; then
-        brew install mysql pkg-config
-    else
-        echo "⚠️ Could not install MySQL client automatically. Please install manually."
-    fi
-    
-    # Install Python MySQL client
-    pip install mysqlclient
-}
+echo "🔧 Running migration conflict fix..."
 
 # Function to handle errors
 handle_error() {
@@ -38,15 +18,28 @@ if [ ! -f "manage.py" ]; then
     handle_error "manage.py not found. Are you in the correct directory?"
 fi
 
-# Install MySQL client if needed
-if ! python -c "import MySQLdb" 2>/dev/null; then
-    echo "⚠️ MySQL client not found. Installing..."
-    install_mysql_client
+# Step 1: Verify MySQL client is working
+echo "🔍 Verifying MySQL client..."
+if ! python -c "import MySQLdb; print('✅ MySQL client working')" 2>/dev/null; then
+    echo "❌ MySQL client not working. Installing..."
+    pip install mysqlclient
+    if ! python -c "import MySQLdb; print('✅ MySQL client working after install')" 2>/dev/null; then
+        handle_error "Failed to install MySQL client"
+    fi
 fi
 
-# Step 1: Check for migration conflicts
+# Step 2: Check database connection
+echo "🔍 Testing database connection..."
+python manage.py check --database default || {
+    echo "❌ Database connection failed"
+    exit 1
+}
+
+# Step 3: Check for migration conflicts
 echo "📋 Checking for migration conflicts..."
-if python manage.py showmigrations core 2>&1 | grep -q "Conflicting migrations detected"; then
+MIGRATION_OUTPUT=$(python manage.py showmigrations core 2>&1 || true)
+
+if echo "$MIGRATION_OUTPUT" | grep -q "Conflicting migrations detected"; then
     echo "⚠️ Migration conflicts detected. Running merge..."
     
     # Create merge migration
@@ -60,7 +53,7 @@ else
     echo "✅ No migration conflicts found"
 fi
 
-# Step 2: Apply migrations
+# Step 4: Apply migrations
 echo "📦 Applying migrations..."
 python manage.py migrate || {
     echo "❌ Failed to apply migrations"
@@ -69,7 +62,7 @@ python manage.py migrate || {
 
 echo "✅ Migrations applied successfully"
 
-# Step 3: Quick payment link test
+# Step 5: Quick payment link test
 echo "🧪 Testing payment link functionality..."
 python manage.py shell -c "
 import os
@@ -81,6 +74,11 @@ try:
     from core.payment_link_service import PaymentLinkService
     service = PaymentLinkService()
     print('✅ Payment link service imported successfully')
+    
+    # Test basic functionality
+    from core.models import User, Course
+    print('✅ Models imported successfully')
+    
 except Exception as e:
     print(f'❌ Payment link service test failed: {e}')
     exit(1)
