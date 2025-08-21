@@ -2,6 +2,16 @@
 
 ## 🔧 **Add these commands to your existing pipeline:**
 
+### **First, install MySQL client dependencies:**
+
+```bash
+# Install MySQL client dependencies
+sudo apt-get update && sudo apt-get install -y default-libmysqlclient-dev build-essential pkg-config
+pip install mysqlclient
+```
+
+### **Then, before `python manage.py migrate`, add:**
+
 ### **Before `python manage.py migrate`, add:**
 
 ```bash

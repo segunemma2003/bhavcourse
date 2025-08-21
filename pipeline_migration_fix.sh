@@ -5,6 +5,28 @@
 
 echo "🔧 Running migration conflict fix..."
 
+# Install MySQL client if not already installed
+install_mysql_client() {
+    echo "📦 Installing MySQL client dependencies..."
+    
+    # Check if we're on Ubuntu/Debian
+    if command -v apt-get &> /dev/null; then
+        sudo apt-get update
+        sudo apt-get install -y default-libmysqlclient-dev build-essential pkg-config
+    # Check if we're on CentOS/RHEL
+    elif command -v yum &> /dev/null; then
+        sudo yum install -y mysql-devel gcc
+    # Check if we're on macOS
+    elif command -v brew &> /dev/null; then
+        brew install mysql pkg-config
+    else
+        echo "⚠️ Could not install MySQL client automatically. Please install manually."
+    fi
+    
+    # Install Python MySQL client
+    pip install mysqlclient
+}
+
 # Function to handle errors
 handle_error() {
     echo "❌ Error occurred: $1"
@@ -14,6 +36,12 @@ handle_error() {
 # Check if we're in a Django project
 if [ ! -f "manage.py" ]; then
     handle_error "manage.py not found. Are you in the correct directory?"
+fi
+
+# Install MySQL client if needed
+if ! python -c "import MySQLdb" 2>/dev/null; then
+    echo "⚠️ MySQL client not found. Installing..."
+    install_mysql_client
 fi
 
 # Step 1: Check for migration conflicts
