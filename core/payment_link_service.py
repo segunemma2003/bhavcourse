@@ -69,7 +69,10 @@ class PaymentLinkService:
             base_url = getattr(settings, 'BASE_URL', 'http://localhost:8000')
             callback_url = f"{base_url}/api/payment-links/callback/"
             
-            # Create payment order record
+            # Create payment order record with a temporary order ID
+            import uuid
+            temp_order_id = f"plink_{uuid.uuid4().hex[:16]}"
+            
             payment_order = PaymentOrder.objects.create(
                 user=user,
                 course=course,
@@ -77,7 +80,8 @@ class PaymentLinkService:
                 amount=amount,
                 status='LINK_REQUESTED',
                 reference_id=reference_id,
-                payment_method='PAYMENT_LINK'
+                payment_method='PAYMENT_LINK',
+                razorpay_order_id=temp_order_id  # Set a temporary ID to avoid unique constraint issues
             )
             
             # Generate payment link using Razorpay
@@ -113,10 +117,13 @@ class PaymentLinkService:
                     'error': f"Failed to generate payment link: {razorpay_response.get('error', 'Unknown error')}"
                 }
             
-            # Update payment order with Razorpay link ID (only if not already set)
-            if not payment_order.razorpay_order_id:
+            # Update payment order with Razorpay link ID if we get a valid response
+            if razorpay_response.get('id') and razorpay_response.get('id').strip():
                 payment_order.razorpay_order_id = razorpay_response.get('id')
                 payment_order.save()
+                print(f"Updated payment order with Razorpay ID: {razorpay_response.get('id')}")
+            else:
+                print(f"Keeping temporary order ID: {payment_order.razorpay_order_id}")
             
             # Send email to user (optional - don't fail if email fails)
             email_sent = False
