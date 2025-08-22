@@ -57,15 +57,62 @@ jobs:
       - name: Deploy to server
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         run: |
-          # Add your deployment commands here
-          # For example, using rsync, scp, or deployment tools
-          echo "Deploying to production server..."
-          # rsync -avz --exclude='.git' --exclude='venv' ./ user@server:/path/to/app/
+          echo "🚀 Deploying to production server..."
+
+          # Create SSH directory and set permissions
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          # Add server to known hosts
+          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+
+          # Deploy code to server
+          rsync -avz --delete \
+            --exclude='.git' \
+            --exclude='venv' \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            --exclude='.env' \
+            --exclude='logs' \
+            --exclude='media' \
+            --exclude='static' \
+            ./ ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/var/www/bhavani/
+
+          echo "✅ Code deployed successfully!"
+
+      - name: Run deployment script on server
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        run: |
+          echo "🔧 Running deployment script on server..."
+
+          # Run the deployment script on the server
+          ssh ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
+            cd /var/www/bhavani
+            chmod +x deploy.sh
+            ./deploy.sh
+          EOF
+
+          echo "✅ Deployment script completed!"
 
       - name: Restart services
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         run: |
-          # Add your service restart commands here
-          echo "Restarting services..."
-          # ssh user@server "sudo systemctl restart gunicorn"
-          # ssh user@server "sudo systemctl restart nginx"
+          echo "🔄 Restarting services..."
+
+          # Restart services on server
+          ssh ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
+            sudo systemctl restart redis-server
+            
+            # Restart supervisor if available
+            if command -v supervisorctl &> /dev/null; then
+              sudo supervisorctl restart courseapp:* || echo "Supervisor not configured"
+            fi
+            
+            # Restart gunicorn if running as systemd service
+            sudo systemctl restart gunicorn || echo "Gunicorn not running as systemd service"
+            
+            # Restart nginx
+            sudo systemctl restart nginx || echo "Nginx restart failed"
+          EOF
+
+          echo "✅ Services restarted successfully!"
