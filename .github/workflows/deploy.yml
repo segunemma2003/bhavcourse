@@ -54,29 +54,77 @@ jobs:
       - name: Run tests
         run: python manage.py test
 
-      - name: Deploy to server
+      - name: Setup SSH
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         run: |
-          echo "🚀 Deploying to production server..."
+          echo "🔧 Setting up SSH for deployment..."
+
+          # Debug: Check if secrets are available
+          echo "Checking deployment secrets..."
+          if [ -n "${{ secrets.SERVER_HOST }}" ]; then
+            echo "✅ SERVER_HOST is set"
+          else
+            echo "❌ SERVER_HOST is not set"
+          fi
+
+          if [ -n "${{ secrets.SERVER_USER }}" ]; then
+            echo "✅ SERVER_USER is set"
+          else
+            echo "❌ SERVER_USER is not set"
+          fi
+
+          if [ -n "${{ secrets.SSH_PRIVATE_KEY }}" ]; then
+            echo "✅ SSH_PRIVATE_KEY is set"
+          else
+            echo "❌ SSH_PRIVATE_KEY is not set"
+          fi
 
           # Create SSH directory and set permissions
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
 
-          # Add server to known hosts
-          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+          # Add server to known hosts with error handling
+          if [ -n "${{ secrets.SERVER_HOST }}" ]; then
+            echo "Adding ${{ secrets.SERVER_HOST }} to known hosts..."
+            ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || echo "Warning: Could not add host to known_hosts"
+          else
+            echo "Error: SERVER_HOST secret is not set"
+            exit 1
+          fi
+
+          # Setup SSH key if provided
+          if [ -n "${{ secrets.SSH_PRIVATE_KEY }}" ]; then
+            echo "Setting up SSH private key..."
+            echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+            chmod 600 ~/.ssh/id_rsa
+            eval $(ssh-agent -s)
+            ssh-add ~/.ssh/id_rsa
+          else
+            echo "Warning: SSH_PRIVATE_KEY secret is not set"
+          fi
+
+      - name: Deploy to server
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        run: |
+          echo "🚀 Deploying to production server..."
 
           # Deploy code to server
-          rsync -avz --delete \
-            --exclude='.git' \
-            --exclude='venv' \
-            --exclude='__pycache__' \
-            --exclude='*.pyc' \
-            --exclude='.env' \
-            --exclude='logs' \
-            --exclude='media' \
-            --exclude='static' \
-            ./ ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/var/www/bhavani/
+          if [ -n "${{ secrets.SERVER_USER }}" ] && [ -n "${{ secrets.SERVER_HOST }}" ]; then
+            echo "Deploying to ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}"
+            rsync -avz --delete \
+              --exclude='.git' \
+              --exclude='venv' \
+              --exclude='__pycache__' \
+              --exclude='*.pyc' \
+              --exclude='.env' \
+              --exclude='logs' \
+              --exclude='media' \
+              --exclude='static' \
+              ./ ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/var/www/bhavani/
+          else
+            echo "Error: SERVER_USER or SERVER_HOST secrets are not set"
+            exit 1
+          fi
 
           echo "✅ Code deployed successfully!"
 
