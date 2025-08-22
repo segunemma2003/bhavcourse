@@ -67,7 +67,7 @@ jobs:
             echo "❌ HOST is not set"
           fi
 
-          if [ -n "${{ secrets.USER }}" ]; then
+          if [ -n "${{ secrets.USERNAME }}" ]; then
             echo "✅ USER is set"
           else
             echo "❌ USER is not set"
@@ -109,8 +109,8 @@ jobs:
           echo "🚀 Deploying to production server..."
 
           # Deploy code to server
-          if [ -n "${{ secrets.USER }}" ] && [ -n "${{ secrets.HOST }}" ]; then
-            echo "Deploying to ${{ secrets.USER }}@${{ secrets.HOST }}"
+          if [ -n "${{ secrets.USERNAME }}" ] && [ -n "${{ secrets.HOST }}" ]; then
+            echo "Deploying to ${{ secrets.USERNAME }}@${{ secrets.HOST }}"
             rsync -avz --delete \
               --exclude='.git' \
               --exclude='venv' \
@@ -120,7 +120,7 @@ jobs:
               --exclude='logs' \
               --exclude='media' \
               --exclude='static' \
-              ./ ${{ secrets.USER }}@${{ secrets.HOST }}:/var/www/bhavani/
+              ./ ${{ secrets.USERNAME }}@${{ secrets.HOST }}:/var/www/bhavani/
           else
             echo "Error: USER or HOST secrets are not set"
             exit 1
@@ -134,7 +134,7 @@ jobs:
           echo "🔧 Running deployment script on server..."
 
           # Run the deployment script on the server
-          ssh ${{ secrets.USER }}@${{ secrets.HOST }} << 'EOF'
+          ssh ${{ secrets.USERNAME }}@${{ secrets.HOST }} << 'EOF'
             cd /var/www/bhavani
             chmod +x deploy.sh
             ./deploy.sh
@@ -148,7 +148,7 @@ jobs:
           echo "🔧 Fixing database issues..."
 
           # Run the database fix script on the server
-          ssh ${{ secrets.USER }}@${{ secrets.HOST }} << 'EOF'
+          ssh ${{ secrets.USERNAME }}@${{ secrets.HOST }} << 'EOF'
             cd /var/www/bhavani
             source venv/bin/activate
             python fix_payment_orders.py
@@ -162,7 +162,7 @@ jobs:
           echo "🔄 Restarting services..."
 
           # Restart services on server
-          ssh ${{ secrets.USER }}@${{ secrets.HOST }} << 'EOF'
+          ssh ${{ secrets.USERNAME }}@${{ secrets.HOST }} << 'EOF'
             sudo systemctl restart redis-server
             
             # Restart supervisor if available
