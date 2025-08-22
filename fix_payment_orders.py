@@ -1,57 +1,78 @@
 #!/usr/bin/env python3
 """
-Fix payment orders with empty razorpay_order_id values
+Script to fix PaymentOrder records with empty razorpay_order_id values.
+This should be run on the server where the database is accessible.
 """
 
 import os
 import sys
 import django
-from pathlib import Path
+import uuid
 
-# Add the project directory to Python path
-project_dir = Path(__file__).parent
-sys.path.insert(0, str(project_dir))
+# Add the project directory to the Python path
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# Set up Django environment
+# Set up Django
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'courseapp.settings')
+django.setup()
 
-def fix_payment_orders():
-    """Fix payment orders with empty razorpay_order_id"""
-    print("🔧 Fixing Payment Orders with Empty razorpay_order_id:")
+from core.models import PaymentOrder
+
+def fix_empty_razorpay_ids():
+    """Fix PaymentOrder records with empty razorpay_order_id values"""
+    print("Starting to fix empty razorpay_order_id values...")
     
-    try:
-        django.setup()
-        from core.models import PaymentOrder
-        import uuid
+    # Find all PaymentOrder records with empty razorpay_order_id
+    empty_orders = PaymentOrder.objects.filter(
+        razorpay_order_id=''
+    )
+    
+    print(f"Found {empty_orders.count()} orders with empty razorpay_order_id")
+    
+    if empty_orders.count() == 0:
+        print("No empty razorpay_order_id values found. Nothing to fix.")
+        return
+    
+    fixed_count = 0
+    for order in empty_orders:
+        # Generate a unique temporary ID
+        new_order_id = f"plink_{uuid.uuid4().hex[:16]}"
         
-        # Find payment orders with empty razorpay_order_id
-        empty_orders = PaymentOrder.objects.filter(razorpay_order_id='')
-        print(f"Found {empty_orders.count()} payment orders with empty razorpay_order_id")
+        # Check if this ID already exists
+        while PaymentOrder.objects.filter(razorpay_order_id=new_order_id).exists():
+            new_order_id = f"plink_{uuid.uuid4().hex[:16]}"
         
-        if empty_orders.count() > 0:
-            # Update them with unique IDs
-            for order in empty_orders:
-                order.razorpay_order_id = f"fixed_{uuid.uuid4().hex[:16]}"
-                order.save()
-                print(f"Fixed order {order.id}: {order.razorpay_order_id}")
+        # Update the order
+        order.razorpay_order_id = new_order_id
+        order.save()
+        fixed_count += 1
         
-        # Also check for null values
-        null_orders = PaymentOrder.objects.filter(razorpay_order_id__isnull=True)
-        print(f"Found {null_orders.count()} payment orders with null razorpay_order_id")
-        
-        if null_orders.count() > 0:
-            # Update them with unique IDs
-            for order in null_orders:
-                order.razorpay_order_id = f"fixed_{uuid.uuid4().hex[:16]}"
-                order.save()
-                print(f"Fixed null order {order.id}: {order.razorpay_order_id}")
-        
-        print("✅ Payment orders fixed successfully")
-        return True
-        
-    except Exception as e:
-        print(f"❌ Failed to fix payment orders: {e}")
-        return False
+        print(f'Fixed order {order.id}: {new_order_id}')
+    
+    print(f"Successfully fixed {fixed_count} PaymentOrder records")
+
+def check_duplicate_razorpay_ids():
+    """Check for any duplicate razorpay_order_id values"""
+    print("\nChecking for duplicate razorpay_order_id values...")
+    
+    from django.db.models import Count
+    
+    duplicates = PaymentOrder.objects.values('razorpay_order_id').annotate(
+        count=Count('razorpay_order_id')
+    ).filter(count__gt=1)
+    
+    if duplicates.exists():
+        print(f"Found {duplicates.count()} duplicate razorpay_order_id values:")
+        for dup in duplicates:
+            print(f"  - {dup['razorpay_order_id']}: {dup['count']} occurrences")
+    else:
+        print("No duplicate razorpay_order_id values found.")
 
 if __name__ == "__main__":
-    fix_payment_orders() 
+    try:
+        fix_empty_razorpay_ids()
+        check_duplicate_razorpay_ids()
+        print("\n✅ Database fix completed successfully!")
+    except Exception as e:
+        print(f"\n❌ Error: {str(e)}")
+        sys.exit(1) 

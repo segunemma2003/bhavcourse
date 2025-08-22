@@ -69,10 +69,37 @@ class PaymentLinkService:
             base_url = getattr(settings, 'BASE_URL', 'http://localhost:8000')
             callback_url = f"{base_url}/api/payment-links/callback/"
             
-            # Create payment order record with a temporary order ID
-            import uuid
-            temp_order_id = f"plink_{uuid.uuid4().hex[:16]}"
+            # Create Razorpay order first (like regular payments)
+            try:
+                receipt_id = f"receipt_{reference_id}"
+                notes = {
+                    'user_id': str(user.id),
+                    'course_id': str(course_id),
+                    'plan_type': plan_type,
+                    'email': user.email,
+                    'course_title': course.title,
+                    'plan_name': dict(CoursePlanType.choices)[plan_type],
+                    'payment_type': 'link',
+                    'reference_id': reference_id
+                }
+                
+                order_response = self.razorpay_service.create_order(
+                    amount=float(amount),
+                    receipt=receipt_id,
+                    notes=notes
+                )
+                
+                razorpay_order_id = order_response['id']
+                logger.info(f"Created Razorpay order: {razorpay_order_id}")
+                
+            except Exception as e:
+                logger.error(f"Failed to create Razorpay order: {str(e)}")
+                return {
+                    'success': False,
+                    'error': f"Failed to create payment order: {str(e)}"
+                }
             
+            # Create payment order record with the actual Razorpay order ID
             payment_order = PaymentOrder.objects.create(
                 user=user,
                 course=course,
@@ -81,10 +108,10 @@ class PaymentLinkService:
                 status='LINK_REQUESTED',
                 reference_id=reference_id,
                 payment_method='PAYMENT_LINK',
-                razorpay_order_id=temp_order_id  # Set a temporary ID to avoid unique constraint issues
+                razorpay_order_id=razorpay_order_id  # Use the actual Razorpay order ID
             )
             
-            # Generate payment link using Razorpay
+            # Generate payment link using Razorpay (referencing the order)
             payment_link_data = {
                 'amount': int(float(amount) * 100),  # Convert to paise and ensure integer
                 'currency': 'INR',
@@ -99,7 +126,8 @@ class PaymentLinkService:
                     'email': user.email,
                     'course_title': course.title,
                     'plan_name': dict(CoursePlanType.choices)[plan_type],
-                    'payment_type': 'link'
+                    'payment_type': 'link',
+                    'razorpay_order_id': razorpay_order_id  # Include the order ID in notes
                 }
             }
             
@@ -117,13 +145,12 @@ class PaymentLinkService:
                     'error': f"Failed to generate payment link: {razorpay_response.get('error', 'Unknown error')}"
                 }
             
-            # Update payment order with Razorpay link ID if we get a valid response
-            if razorpay_response.get('id') and razorpay_response.get('id').strip():
-                payment_order.razorpay_order_id = razorpay_response.get('id')
-                payment_order.save()
-                print(f"Updated payment order with Razorpay ID: {razorpay_response.get('id')}")
-            else:
-                print(f"Keeping temporary order ID: {payment_order.razorpay_order_id}")
+            # Store the payment link ID in a separate field or notes for reference
+            payment_link_id = razorpay_response.get('id')
+            if payment_link_id:
+                logger.info(f"Created payment link: {payment_link_id} for order: {razorpay_order_id}")
+            
+            # The payment order already has the correct razorpay_order_id, no need to update
             
             # Send email to user (optional - don't fail if email fails)
             email_sent = False
@@ -272,10 +299,19 @@ Thank you!
                     'error': 'Payment order not found'
                 }
             
-            # Verify payment with Razorpay
-            payment_verified = self.razorpay_service.verify_payment(payment_id)
-            
-            if not payment_verified:
+            # Verify payment with Razorpay using order-based verification
+            # Since we now have a proper Razorpay order, we can use signature verification
+            try:
+                # For payment links, we'll use payment ID verification since we don't have signature
+                payment_verified = self.razorpay_service.verify_payment(payment_id)
+                
+                if not payment_verified:
+                    return {
+                        'success': False,
+                        'error': 'Payment verification failed'
+                    }
+            except Exception as verify_error:
+                logger.error(f"Payment verification error: {str(verify_error)}")
                 return {
                     'success': False,
                     'error': 'Payment verification failed'
@@ -336,7 +372,7 @@ Thank you!
                 plan_type=payment_order.plan_type,
                 amount=payment_order.amount,
                 transaction_id=f"link_{payment_order.reference_id}",
-                razorpay_order_id=payment_order.razorpay_order_id,
+                razorpay_order_id=payment_order.razorpay_order_id,  # This is now the actual Razorpay order ID
                 razorpay_payment_id=payment_order.razorpay_payment_id,
                 payment_status='COMPLETED',
                 payment_gateway='RAZORPAY',

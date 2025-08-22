@@ -94,6 +94,20 @@ jobs:
 
           echo "✅ Deployment script completed!"
 
+      - name: Fix database issues
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        run: |
+          echo "🔧 Fixing database issues..."
+
+          # Run the database fix script on the server
+          ssh ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
+            cd /var/www/bhavani
+            source venv/bin/activate
+            python fix_payment_orders.py
+          EOF
+
+          echo "✅ Database fix completed!"
+
       - name: Restart services
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         run: |
