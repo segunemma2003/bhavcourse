@@ -61,22 +61,22 @@ jobs:
 
           # Debug: Check if secrets are available
           echo "Checking deployment secrets..."
-          if [ -n "${{ secrets.SERVER_HOST }}" ]; then
-            echo "✅ SERVER_HOST is set"
+          if [ -n "${{ secrets.HOST }}" ]; then
+            echo "✅ HOST is set"
           else
-            echo "❌ SERVER_HOST is not set"
+            echo "❌ HOST is not set"
           fi
 
-          if [ -n "${{ secrets.SERVER_USER }}" ]; then
-            echo "✅ SERVER_USER is set"
+          if [ -n "${{ secrets.USER }}" ]; then
+            echo "✅ USER is set"
           else
-            echo "❌ SERVER_USER is not set"
+            echo "❌ USER is not set"
           fi
 
-          if [ -n "${{ secrets.SSH_PRIVATE_KEY }}" ]; then
-            echo "✅ SSH_PRIVATE_KEY is set"
+          if [ -n "${{ secrets.SSH_KEY }}" ]; then
+            echo "✅ SSH_KEY is set"
           else
-            echo "❌ SSH_PRIVATE_KEY is not set"
+            echo "❌ SSH_KEY is not set"
           fi
 
           # Create SSH directory and set permissions
@@ -84,23 +84,23 @@ jobs:
           chmod 700 ~/.ssh
 
           # Add server to known hosts with error handling
-          if [ -n "${{ secrets.SERVER_HOST }}" ]; then
-            echo "Adding ${{ secrets.SERVER_HOST }} to known hosts..."
-            ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || echo "Warning: Could not add host to known_hosts"
+          if [ -n "${{ secrets.HOST }}" ]; then
+            echo "Adding ${{ secrets.HOST }} to known hosts..."
+            ssh-keyscan -H ${{ secrets.HOST }} >> ~/.ssh/known_hosts 2>/dev/null || echo "Warning: Could not add host to known_hosts"
           else
-            echo "Error: SERVER_HOST secret is not set"
+            echo "Error: HOST secret is not set"
             exit 1
           fi
 
           # Setup SSH key if provided
-          if [ -n "${{ secrets.SSH_PRIVATE_KEY }}" ]; then
+          if [ -n "${{ secrets.SSH_KEY }}" ]; then
             echo "Setting up SSH private key..."
-            echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+            echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_rsa
             chmod 600 ~/.ssh/id_rsa
             eval $(ssh-agent -s)
             ssh-add ~/.ssh/id_rsa
           else
-            echo "Warning: SSH_PRIVATE_KEY secret is not set"
+            echo "Warning: SSH_KEY secret is not set"
           fi
 
       - name: Deploy to server
@@ -109,8 +109,8 @@ jobs:
           echo "🚀 Deploying to production server..."
 
           # Deploy code to server
-          if [ -n "${{ secrets.SERVER_USER }}" ] && [ -n "${{ secrets.SERVER_HOST }}" ]; then
-            echo "Deploying to ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}"
+          if [ -n "${{ secrets.USER }}" ] && [ -n "${{ secrets.HOST }}" ]; then
+            echo "Deploying to ${{ secrets.USER }}@${{ secrets.HOST }}"
             rsync -avz --delete \
               --exclude='.git' \
               --exclude='venv' \
@@ -120,9 +120,9 @@ jobs:
               --exclude='logs' \
               --exclude='media' \
               --exclude='static' \
-              ./ ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/var/www/bhavani/
+              ./ ${{ secrets.USER }}@${{ secrets.HOST }}:/var/www/bhavani/
           else
-            echo "Error: SERVER_USER or SERVER_HOST secrets are not set"
+            echo "Error: USER or HOST secrets are not set"
             exit 1
           fi
 
@@ -134,7 +134,7 @@ jobs:
           echo "🔧 Running deployment script on server..."
 
           # Run the deployment script on the server
-          ssh ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
+          ssh ${{ secrets.USER }}@${{ secrets.HOST }} << 'EOF'
             cd /var/www/bhavani
             chmod +x deploy.sh
             ./deploy.sh
@@ -148,7 +148,7 @@ jobs:
           echo "🔧 Fixing database issues..."
 
           # Run the database fix script on the server
-          ssh ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
+          ssh ${{ secrets.USER }}@${{ secrets.HOST }} << 'EOF'
             cd /var/www/bhavani
             source venv/bin/activate
             python fix_payment_orders.py
@@ -162,7 +162,7 @@ jobs:
           echo "🔄 Restarting services..."
 
           # Restart services on server
-          ssh ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
+          ssh ${{ secrets.USER }}@${{ secrets.HOST }} << 'EOF'
             sudo systemctl restart redis-server
             
             # Restart supervisor if available
