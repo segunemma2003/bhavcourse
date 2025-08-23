@@ -17,6 +17,10 @@ source venv/bin/activate
 echo "📦 Installing dependencies..."
 pip install -r requirements.txt
 
+# Ensure mysqlclient is installed correctly
+echo "📦 Ensuring mysqlclient is installed..."
+pip install mysqlclient>=2.2.0,<2.3.0 || pip install mysqlclient
+
 # Run database migrations
 echo "🗄️  Running database migrations..."
 python manage.py migrate
