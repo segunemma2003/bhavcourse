@@ -34,7 +34,7 @@ def fix_empty_razorpay_ids():
         return
     
     fixed_count = 0
-            for order in empty_orders:
+    for order in empty_orders:
         # Generate a unique temporary ID
         new_order_id = f"plink_{uuid.uuid4().hex[:16]}"
         
@@ -44,7 +44,7 @@ def fix_empty_razorpay_ids():
         
         # Update the order
         order.razorpay_order_id = new_order_id
-                order.save()
+        order.save()
         fixed_count += 1
         
         print(f'Fixed order {order.id}: {new_order_id}')
@@ -59,7 +59,7 @@ def check_duplicate_razorpay_ids():
     
     duplicates = PaymentOrder.objects.values('razorpay_order_id').annotate(
         count=Count('razorpay_order_id')
-    ).filter(count__gt=1)
+    ).filter(count__gt=1, razorpay_order_id__isnull=False)
     
     if duplicates.exists():
         print(f"Found {duplicates.count()} duplicate razorpay_order_id values:")
