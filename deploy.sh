@@ -37,10 +37,18 @@ else
     echo "⚠️  fix_payment_orders.py not found, skipping payment order fix"
 fi
 
-# Set proper permissions
-echo "🔐 Setting permissions..."
-chmod -R 755 /var/www/bhavani
-chown -R www-data:www-data /var/www/bhavani
+# Set basic permissions (skip ownership changes to avoid permission errors)
+echo "🔐 Setting basic permissions..."
+chmod -R 755 /var/www/bhavani 2>/dev/null || echo "⚠️  Some permission changes failed (this is normal)"
+
+# Ensure Django can write to media and static directories
+if [ -d "/var/www/bhavani/media" ]; then
+    chmod -R 775 /var/www/bhavani/media 2>/dev/null || echo "⚠️  Could not set media permissions"
+fi
+
+if [ -d "/var/www/bhavani/static" ]; then
+    chmod -R 775 /var/www/bhavani/static 2>/dev/null || echo "⚠️  Could not set static permissions"
+fi
 
 # Restart services
 echo "🔄 Restarting services..."
