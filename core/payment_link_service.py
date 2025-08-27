@@ -171,8 +171,17 @@ class PaymentLinkService:
                 logger.error(f"Failed to send payment link email: {str(email_error)}")
                 # Don't fail the entire request if email fails
             
-            # Create notification
+            # Create notification with timeout
             try:
+                import signal
+                
+                def notification_timeout_handler(signum, frame):
+                    raise TimeoutError("Notification creation timed out")
+                
+                # Set timeout for notification creation (5 seconds)
+                signal.signal(signal.SIGALRM, notification_timeout_handler)
+                signal.alarm(5)
+                
                 Notification.objects.create(
                     user=user,
                     title="Payment Link Generated",
@@ -180,6 +189,12 @@ class PaymentLinkService:
                     notification_type='PAYMENT',
                     is_seen=False
                 )
+                
+                # Cancel the alarm
+                signal.alarm(0)
+                
+            except TimeoutError:
+                logger.error("Notification creation timed out")
             except Exception as notification_error:
                 logger.error(f"Failed to create notification: {str(notification_error)}")
             
@@ -262,15 +277,35 @@ Thank you!
                 """
                 html_message = None
             
-            # Send email
-            send_mail(
-                subject=subject,
-                message=plain_message,
-                from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@yourapp.com'),
-                recipient_list=[user.email],
-                html_message=html_message,
-                fail_silently=False
-            )
+            # Send email with timeout
+            try:
+                import signal
+                
+                def email_timeout_handler(signum, frame):
+                    raise TimeoutError("Email sending timed out")
+                
+                # Set timeout for email sending (10 seconds)
+                signal.signal(signal.SIGALRM, email_timeout_handler)
+                signal.alarm(10)
+                
+                send_mail(
+                    subject=subject,
+                    message=plain_message,
+                    from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@yourapp.com'),
+                    recipient_list=[user.email],
+                    html_message=html_message,
+                    fail_silently=True  # Changed to True to prevent hanging
+                )
+                
+                # Cancel the alarm
+                signal.alarm(0)
+                
+            except TimeoutError:
+                logger.error("Email sending timed out")
+                return False
+            except Exception as email_send_error:
+                logger.error(f"Email sending failed: {str(email_send_error)}")
+                return False
             
             logger.info(f"Payment link email sent to {user.email} for course {course.title}")
             return True
