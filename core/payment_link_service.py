@@ -69,37 +69,8 @@ class PaymentLinkService:
             base_url = getattr(settings, 'BASE_URL', 'http://localhost:8000')
             callback_url = f"{base_url}/api/payment-links/callback/"
             
-            # Create Razorpay order first (like regular payments)
-            try:
-                receipt_id = f"receipt_{reference_id}"
-                notes = {
-                    'user_id': str(user.id),
-                    'course_id': str(course_id),
-                    'plan_type': plan_type,
-                    'email': user.email,
-                    'course_title': course.title,
-                    'plan_name': dict(CoursePlanType.choices)[plan_type],
-                    'payment_type': 'link',
-                    'reference_id': reference_id
-                }
-                
-                order_response = self.razorpay_service.create_order(
-                    amount=float(amount),
-                    receipt=receipt_id,
-                    notes=notes
-                )
-                
-                razorpay_order_id = order_response['id']
-                logger.info(f"Created Razorpay order: {razorpay_order_id}")
-                
-            except Exception as e:
-                logger.error(f"Failed to create Razorpay order: {str(e)}")
-                return {
-                    'success': False,
-                    'error': f"Failed to create payment order: {str(e)}"
-                }
-            
-            # Create payment order record with the actual Razorpay order ID
+            # Create payment order record with a temporary ID first
+            temp_order_id = f"plink_{uuid.uuid4().hex[:16]}"
             payment_order = PaymentOrder.objects.create(
                 user=user,
                 course=course,
@@ -108,10 +79,10 @@ class PaymentLinkService:
                 status='LINK_REQUESTED',
                 reference_id=reference_id,
                 payment_method='PAYMENT_LINK',
-                razorpay_order_id=razorpay_order_id  # Use the actual Razorpay order ID
+                razorpay_order_id=temp_order_id  # Temporary ID, will be updated after payment link creation
             )
             
-            # Generate payment link using Razorpay (referencing the order)
+            # Generate payment link using Razorpay
             payment_link_data = {
                 'amount': int(float(amount) * 100),  # Convert to paise and ensure integer
                 'currency': 'INR',
@@ -126,13 +97,44 @@ class PaymentLinkService:
                     'email': user.email,
                     'course_title': course.title,
                     'plan_name': dict(CoursePlanType.choices)[plan_type],
-                    'payment_type': 'link',
-                    'razorpay_order_id': razorpay_order_id  # Include the order ID in notes
+                    'payment_type': 'link'
                 }
             }
             
-            # Create Razorpay payment link
-            razorpay_response = self.razorpay_service.create_payment_link(payment_link_data)
+            # Create Razorpay payment link with timeout
+            try:
+                import signal
+                
+                def timeout_handler(signum, frame):
+                    raise TimeoutError("Payment link creation timed out")
+                
+                # Set timeout for payment link creation (30 seconds)
+                signal.signal(signal.SIGALRM, timeout_handler)
+                signal.alarm(30)
+                
+                razorpay_response = self.razorpay_service.create_payment_link(payment_link_data)
+                
+                # Cancel the alarm
+                signal.alarm(0)
+                
+            except TimeoutError:
+                logger.error("Payment link creation timed out")
+                # Mark order as failed
+                payment_order.status = 'FAILED'
+                payment_order.save()
+                return {
+                    'success': False,
+                    'error': 'Payment link creation timed out. Please try again.'
+                }
+            except Exception as e:
+                logger.error(f"Payment link creation failed: {str(e)}")
+                # Mark order as failed
+                payment_order.status = 'FAILED'
+                payment_order.save()
+                return {
+                    'success': False,
+                    'error': f'Payment link creation failed: {str(e)}'
+                }
             
             if not razorpay_response.get('success'):
                 # Mark order as failed
@@ -145,12 +147,14 @@ class PaymentLinkService:
                     'error': f"Failed to generate payment link: {razorpay_response.get('error', 'Unknown error')}"
                 }
             
-            # Store the payment link ID in a separate field or notes for reference
+            # Update payment order with the payment link ID
             payment_link_id = razorpay_response.get('id')
             if payment_link_id:
-                logger.info(f"Created payment link: {payment_link_id} for order: {razorpay_order_id}")
-            
-            # The payment order already has the correct razorpay_order_id, no need to update
+                payment_order.razorpay_order_id = payment_link_id
+                payment_order.save()
+                logger.info(f"Created payment link: {payment_link_id}")
+            else:
+                logger.warning("No payment link ID received from Razorpay")
             
             # Send email to user (optional - don't fail if email fails)
             email_sent = False

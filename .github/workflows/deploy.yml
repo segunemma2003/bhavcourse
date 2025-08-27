@@ -35,8 +35,10 @@ jobs:
         run: |
           python -c "import MySQLdb; print('✅ MySQL client working')"
 
-      - name: Set up environment variables
+      - name: Set up environment variables (local testing only)
         run: |
+          # Only create .env for local testing in GitHub Actions
+          # This will NOT be deployed to the server
           echo "SECRET_KEY=${{ secrets.SECRET_KEY }}" >> .env
           echo "DEBUG=False" >> .env
           echo "ALLOWED_HOSTS=${{ secrets.ALLOWED_HOSTS }}" >> .env
