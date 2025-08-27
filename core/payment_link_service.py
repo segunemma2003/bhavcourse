@@ -66,7 +66,7 @@ class PaymentLinkService:
             reference_id = f"link_{str(uuid.uuid4())[:8]}"
             
             # Get base URL for callback
-            base_url = getattr(settings, 'BASE_URL', 'http://localhost:8000')
+            base_url = getattr(settings, 'BASE_URL', 'https://api.pixelcraftsbybhavani.com')
             callback_url = f"{base_url}/api/payment-links/callback/"
             
             # Create payment order record with a temporary ID first
