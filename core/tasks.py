@@ -12,6 +12,7 @@ from .s3_utils import generate_presigned_url, is_s3_url
 from datetime import timedelta
 import logging
 import hashlib
+import random
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -833,3 +834,90 @@ def bulk_process_new_curriculum():
             args=[item.id],
             countdown=random.randint(1, 10)  # Spread the load
         )
+
+
+@shared_task
+def send_payment_link_email_async(user_id, course_id, plan_type, amount, payment_link, reference_id):
+    """
+    Send payment link email asynchronously via Celery
+    
+    Args:
+        user_id: User ID
+        course_id: Course ID
+        plan_type: Plan type
+        amount: Amount
+        payment_link: Payment link URL
+        reference_id: Reference ID
+    """
+    try:
+        from django.template.loader import render_to_string
+        from django.utils import timezone
+        from datetime import timedelta
+        
+        # Get user and course
+        user = User.objects.get(id=user_id)
+        course = Course.objects.get(id=course_id)
+        
+        # Check if email settings are configured
+        if not getattr(settings, 'EMAIL_HOST_USER', None):
+            logger.warning("Email settings not configured. Skipping email send.")
+            return False
+        
+        subject = f"Payment Link for {course.title} - {dict(CoursePlanType.choices)[plan_type]}"
+        
+        # Email context
+        context = {
+            'user_name': user.full_name or user.email.split('@')[0],
+            'course_title': course.title,
+            'course_description': course.small_desc or course.description[:100] + '...' if course.description else 'Course description',
+            'plan_type': dict(CoursePlanType.choices)[plan_type],
+            'amount': amount,
+            'payment_link': payment_link,
+            'reference_id': reference_id,
+            'expiry_date': (timezone.now() + timedelta(days=7)).strftime('%B %d, %Y'),
+            'support_email': getattr(settings, 'SUPPORT_EMAIL', 'support@yourapp.com')
+        }
+        
+        # Render email template
+        try:
+            html_message = render_to_string('emails/payment_link.html', context)
+            plain_message = render_to_string('emails/payment_link.txt', context)
+        except Exception as template_error:
+            logger.error(f"Failed to render email templates: {str(template_error)}")
+            # Fallback to simple text email
+            plain_message = f"""
+Payment Link for {course.title}
+
+Hello {context['user_name']},
+
+Your payment link for the course has been generated successfully.
+
+Course: {course.title}
+Plan: {context['plan_type']}
+Amount: ₹{amount}
+Reference ID: {reference_id}
+
+Payment Link: {payment_link}
+
+This link will expire on {context['expiry_date']}.
+
+Thank you!
+            """
+            html_message = None
+        
+        # Send email
+        send_mail(
+            subject=subject,
+            message=plain_message,
+            from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@yourapp.com'),
+            recipient_list=[user.email],
+            html_message=html_message,
+            fail_silently=False  # We want to know if it fails in async task
+        )
+        
+        logger.info(f"Payment link email sent successfully to {user.email} for course {course.title}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to send payment link email asynchronously: {str(e)}")
+        return False

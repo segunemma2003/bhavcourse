@@ -156,20 +156,24 @@ class PaymentLinkService:
             else:
                 logger.warning("No payment link ID received from Razorpay")
             
-            # Send email to user (optional - don't fail if email fails)
-            email_sent = False
+            # Queue email sending asynchronously (don't block the response)
             try:
-                email_sent = self._send_payment_link_email(
-                    user=user,
-                    course=course,
+                from core.tasks import send_payment_link_email_async
+                
+                # Queue the email task
+                send_payment_link_email_async.delay(
+                    user_id=user.id,
+                    course_id=course.id,
                     plan_type=plan_type,
                     amount=amount,
                     payment_link=razorpay_response.get('short_url'),
                     reference_id=reference_id
                 )
+                logger.info(f"Payment link email queued for user {user.email}")
+                email_sent = True
             except Exception as email_error:
-                logger.error(f"Failed to send payment link email: {str(email_error)}")
-                # Don't fail the entire request if email fails
+                logger.error(f"Failed to queue payment link email: {str(email_error)}")
+                email_sent = False
             
             # Create notification with timeout
             try:
