@@ -152,7 +152,7 @@ ACCOUNT_SIGNUP_FIELDS = {
     'password2': {'required': True, 'key': False}
 }
 
-FIREBASE_CREDENTIALS_PATH = os.path.join(BASE_DIR, 'firebase-credentials.json')
+FIREBASE_CREDENTIALS_PATH = os.path.join(BASE_DIR, 'firebases.json')
 ACCOUNT_USER_MODEL_USERNAME_FIELD   = None
 ACCOUNT_ADAPTER = 'core.adapters.CustomAccountAdapter'
 SOCIALACCOUNT_ADAPTER = 'core.adapters.CustomSocialAccountAdapter'
