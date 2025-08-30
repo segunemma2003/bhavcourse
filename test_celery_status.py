@@ -124,7 +124,7 @@ def test_payment_link_service():
         # Create payment link request
         result = service.create_payment_link_request(
             user=user,
-            course=course,
+            course_id=course.id,
             plan_type=CoursePlanType.ONE_MONTH,
             amount=100.00
         )
